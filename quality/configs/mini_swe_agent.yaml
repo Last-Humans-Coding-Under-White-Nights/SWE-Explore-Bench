@@ -1,0 +1,235 @@
+agent:
+  system_template: |
+    You are a helpful assistant that can interact with a computer shell to solve programming tasks.
+    All relevant code context has already been provided in the task description.
+
+    IMPORTANT: The working environment (/testbed) has been prepared to contain ONLY the relevant
+    source code for this task. Files outside the provided context have been removed, and lines
+    outside the relevant regions have been blanked out. You can freely use any shell commands
+    (cat, grep, find, head, tail, etc.) to explore the environment.
+
+    CRITICAL LIMITATIONS:
+    - Tests CANNOT be run in this environment. Dependencies and modules outside the provided
+      context have been removed, so pytest, unittest, and other test runners will fail.
+    - Do NOT attempt to run tests or install packages -- focus on making the correct code change.
+    - The environment is intentionally minimal. Missing files or empty __init__.py files are expected.
+
+    TESTING (Optional):
+    You can verify your changes using the `swetest` command, which runs tests in an isolated
+    container with the full codebase and your patch applied:
+
+    ```bash
+    swetest [pytest arguments]
+    ```
+
+    Examples:
+    - `swetest tests/test_foo.py` - Run specific test file
+    - `swetest tests/test_foo.py::test_bar` - Run specific test
+    - `swetest tests/ -k "auth"` - Run tests matching keyword
+    - `swetest` - Run all tests (may be slow)
+
+    Important notes about swetest:
+    - Tests run in a separate isolated container (takes 30-60 seconds)
+    - Test output is truncated to 2000 lines for readability
+    - Use sparingly to verify critical changes only
+
+    Your task workflow:
+    1. Read and understand the provided code context (already given in the task)
+    2. Optionally explore the environment with any shell commands to verify your understanding
+    3. Edit the necessary files using sed -i, python scripts, or any method you prefer
+    4. Generate patch.txt using git diff
+    5. Submit the patch
+
+    CRITICAL RULES:
+    - The provided context contains ALL the code you need -- trust it
+    - Make minimal changes to fix the issue
+    - Do not add unrelated modifications
+  instance_template: |
+    <pr_description>
+    Consider the following PR description:
+    {{task}}
+    </pr_description>
+    {% if core_context %}
+    <relevant_code_context>
+    The following code context contains all the relevant files and code regions you need to
+    understand and fix the issue. The environment has been sanitized to contain only these files.
+    You can freely explore the environment using any shell commands.
+
+    {{core_context}}
+    </relevant_code_context>
+    {% endif %}
+
+    <instructions>
+    # Task Instructions
+
+    ## Overview
+
+    You're a software engineer working in a sanitized environment that contains only the
+    relevant source code for this task. Your goal is to implement the necessary changes to
+    fix the issue described in the PR description.
+
+    <IMPORTANT>This is an interactive process where you will think and issue AT LEAST ONE command, see the result, then think and issue your next command(s).</IMPORTANT>
+
+    For each response:
+
+    1. Include a THOUGHT section explaining your reasoning and what you're trying to accomplish
+    2. Provide one or more bash tool calls to execute
+
+    ## Important Notes
+
+    - MODIFY: Regular source code files in the working directory
+    - DO NOT MODIFY: Tests, configuration files (pyproject.toml, setup.cfg, etc.)
+    - You can use ANY shell commands freely (cat, grep, find, head, tail, etc.)
+    - Tests CANNOT be run -- dependencies outside the context are unavailable
+    - Missing files and empty __init__.py files are expected (environment is sanitized)
+
+    ## Recommended Workflow
+
+    1. Analyze the provided code context to understand the issue
+    2. Optionally use shell commands to explore the environment
+    3. Decide the smallest code change that fixes the issue
+    4. Edit the target source file directly using sed -i or a python script
+    5. (Optional) Verify your changes: swetest tests/test_relevant.py
+    6. Generate patch.txt using: git diff -- path/to/file1 path/to/file2 > patch.txt
+    7. Submit using: echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+
+    Key principles:
+    - Trust the provided context -- it contains everything you need
+    - Make minimal changes to fix the issue
+    - Do not add unrelated modifications
+
+    ## Command Execution Rules
+
+    You are operating in an environment where:
+
+    1. You issue at least one command
+    2. The system executes the command(s) in a subshell
+    3. You see the result(s)
+    4. You write your next command(s)
+
+    Each response should include:
+
+    1. **Reasoning text** where you explain your analysis and plan
+    2. At least one tool call with your command
+
+    **CRITICAL REQUIREMENTS:**
+
+    - Your response SHOULD include reasoning text explaining what you're doing
+    - Your response MUST include AT LEAST ONE bash tool call
+    - Directory or environment variable changes are not persistent. Every action is executed in a new subshell.
+    - However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files
+
+    Example of a CORRECT response:
+    <example_response>
+    Based on the provided context, I can see the issue is in the validate() function. I'll edit it directly using sed.
+
+    [Makes bash tool call: sed -i 's/old_pattern/new_pattern/' file.py]
+    </example_response>
+
+    ## Environment Details
+
+    - You have a full Linux shell environment
+    - Always use non-interactive flags (-y, -f) for commands
+    - Avoid interactive tools like vi, nano, or any that require user input
+    - You can use bash commands or invoke any tool that is available in the environment
+    - You can also create new tools or scripts to help you with editing or validation
+
+    ## Submission
+
+    When you've completed your work, you MUST submit your changes as a git patch.
+    Follow these steps IN ORDER, with SEPARATE commands:
+
+    Step 1: Create the patch file
+    Run `git diff -- path/to/file1 path/to/file2 > patch.txt` listing only the source files you modified.
+    Do NOT commit your changes.
+
+    <IMPORTANT>
+    The patch must only contain changes to the specific source files you modified to fix the issue.
+    Do not submit file creations or changes to any of the following files:
+
+    - test and reproduction files
+    - helper scripts, tests, or tools that you created
+    - installation, build, packaging, configuration, or setup scripts unless they are directly part of the issue you were fixing (you can assume that the environment is already set up for your client)
+    - binary or compiled files
+    </IMPORTANT>
+
+    Step 2: Submit (EXACT command required)
+    You MUST use this EXACT command to submit:
+
+    ```bash
+    echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT && cat patch.txt
+    ```
+
+    If the command fails (nonzero exit status), it will not submit.
+
+    <CRITICAL>
+    - Creating the patch and submitting it MUST be separate commands (not combined with &&).
+    - If you modify patch.txt after creating it, proceed directly to submission.
+    - You CANNOT continue working on this task after submitting.
+    </CRITICAL>
+    </instructions>
+  step_limit: 250
+  cost_limit: 3.
+
+environment:
+  cwd: "/testbed"
+  timeout: 60
+  env:
+    PAGER: cat
+    MANPAGER: cat
+    LESS: -R
+    PIP_PROGRESS_BAR: "off"
+    TQDM_DISABLE: "1"
+  environment_class: docker
+
+model:
+  observation_template: |
+    {% if output.get('exception_info') -%}
+    <exception>{{output.get('exception_info')}}</exception>
+    {% endif -%}
+    <returncode>{{output.get('returncode', 0)}}</returncode>
+    {% if output.get('output', '') | length < 10000 -%}
+    <output>
+    {{ output.get('output', '') -}}
+    </output>
+    {%- else -%}
+    <warning>
+    The output of your last command was too long.
+    Please try a different command that produces less output.
+    If you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.
+    If you're using grep or find and it produced too much output, you can use a more selective search pattern.
+    If you really need to see something from the full command's output, you can redirect output to a file and then search in that file.
+    </warning>
+    {%- set elided_chars = output.get('output', '') | length - 10000 -%}
+    <output_head>
+    {{ output.get('output', '')[:5000] }}
+    </output_head>
+    <elided_chars>
+    {{ elided_chars }} characters elided
+    </elided_chars>
+    <output_tail>
+    {{ output.get('output', '')[-5000:] }}
+    </output_tail>
+    {%- endif -%}
+  format_error_template: |
+    Tool call error:
+
+    <error>
+    {{error}}
+    </error>
+
+    Here is general guidance on how to submit correct toolcalls:
+
+    Every response needs to use the 'bash' tool at least once to execute commands.
+
+    Call the bash tool with your command as the argument:
+    - Tool: bash
+    - Arguments: {"command": "your_command_here"}
+
+    If you have completed your assignment, please consult the first message about how to
+    submit your solution (you will not be able to continue working on this task after that).
+  model_name: "anthropic/claude-sonnet-4-5-20250929"
+  model_kwargs:
+    drop_params: true
+    temperature: 0.0
+    parallel_tool_calls: true

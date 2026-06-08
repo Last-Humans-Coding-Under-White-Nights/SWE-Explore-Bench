@@ -1,0 +1,37 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+trajs/
+*.jsonl
+*.md
+repos
+!**/README.md
+!CLAUDE.md
+refs
+*_trajs
+node_modules
+*.json
+
+repos-*
+
+help.md
+data
+tmp/
+logs/
+outputs/
+sb-cli-reports/
+refined/
+AReaL
+results/
+# Local one-off analysis / operations helpers that should not enter git by default
+scripts/run_openhands_upstream_to_downstream.py
+scripts/scaleup_live_handoff.py
+scripts/scaleup_live_pipeline.py
+scripts/compare_bench_spans.py

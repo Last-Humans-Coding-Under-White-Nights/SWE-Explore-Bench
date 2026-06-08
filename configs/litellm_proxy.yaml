@@ -1,0 +1,40 @@
+# Example LiteLLM proxy config used during development to expose a single
+# upstream chat-completions deployment as an OpenAI-compatible /v1 endpoint
+# (typically at http://127.0.0.1:4000/v1) so that all academic agents can
+# reach it under a single model name. Replace the values below with your own
+# provider / deployment / key.
+#
+# Required env vars (set via .env or shell):
+#   LLM_API_BASE       Upstream chat-completions endpoint (e.g. Azure / OpenAI)
+#   LLM_API_KEY        Upstream API key
+#   LLM_DEPLOYMENT     Upstream deployment / model identifier
+#   PROXY_MASTER_KEY   Local master key clients use to talk to this proxy
+model_list:
+  - model_name: gpt-5.4
+    litellm_params:
+      model: os.environ/LLM_DEPLOYMENT
+      api_base: os.environ/LLM_API_BASE
+      api_key: os.environ/LLM_API_KEY
+      api_version: "2024-12-01-preview"
+  # Common shorthands so existing agent defaults route to the same upstream.
+  - model_name: gpt-4o
+    litellm_params:
+      model: os.environ/LLM_DEPLOYMENT
+      api_base: os.environ/LLM_API_BASE
+      api_key: os.environ/LLM_API_KEY
+      api_version: "2024-12-01-preview"
+  - model_name: gpt-4o-2024-08-06
+    litellm_params:
+      model: os.environ/LLM_DEPLOYMENT
+      api_base: os.environ/LLM_API_BASE
+      api_key: os.environ/LLM_API_KEY
+      api_version: "2024-12-01-preview"
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+  request_timeout: 1800
+
+general_settings:
+  master_key: os.environ/PROXY_MASTER_KEY
+
