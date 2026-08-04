@@ -149,12 +149,32 @@ Available explorers include:
 
 | Family | Explorers |
 | --- | --- |
-| Local retrieval | `bm25`, `tfidf`, `potion`, `rag`, `embed`, `swerank` |
+| Local retrieval | `bm25`, `codenib`, `tfidf`, `potion`, `rag`, `embed`, `swerank` |
 | Simple baselines | `oracle`, `random`, `simple_rule` |
 | Agentic CLIs | `claude_code`, `cursor` |
 | Academic agents | `autocr`, `cosil`, `locagent`, `orcaloca`, `mini_swe_agent`, `awe_agent` |
 
 Agent explorers can be routed through one OpenAI-compatible endpoint with `--academic-api-base`, `--academic-api-key`, and `--academic-model`; see `.env.example` and `configs/litellm_proxy.yaml`.
+
+The optional `codenib` explorer serves ranked regions from a CodeNib BM25
+view. Install CodeNib separately, then let the runner materialize the view or
+reuse an existing manifest:
+
+```bash
+uv pip install codenib
+uv run python eval_runner.py \
+  --bench bench.final.public.jsonl \
+  --repos repos \
+  --issue-map issue_map.json \
+  --explorers codenib \
+  --top-k 5 \
+  --output "results/{explorer}/top{k}.jsonl"
+```
+
+Pass `--no-codenib-auto-index` to require a current, prebuilt CodeNib manifest.
+Only the BM25 view is loaded for queries; graph, vector, and Zoekt views are
+not required. The runner accepts either the workspace containing the `repos/`
+paths recorded in the benchmark or the `repos/` directory itself.
 
 ## Build the Benchmark From Trajectories
 

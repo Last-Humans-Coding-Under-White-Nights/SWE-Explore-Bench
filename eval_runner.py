@@ -45,7 +45,18 @@ METRICS = [
     "first_useful_hit",
 ]
 
-LOCAL_EXPLORERS = {"bm25", "rag", "tfidf", "potion", "simple_rule", "oracle", "random", "embed", "swerank"}
+LOCAL_EXPLORERS = {
+    "bm25",
+    "codenib",
+    "rag",
+    "tfidf",
+    "potion",
+    "simple_rule",
+    "oracle",
+    "random",
+    "embed",
+    "swerank",
+}
 AGENTIC_EXPLORERS = {"claude_code", "cursor"}
 ACADEMIC_EXPLORERS = {"autocr", "cosil", "locagent", "orcaloca", "mini_swe_agent", "awe_agent"}
 ALL_EXPLORERS = LOCAL_EXPLORERS | AGENTIC_EXPLORERS | ACADEMIC_EXPLORERS
@@ -86,7 +97,12 @@ def _resolve_repo_dir(
     if repo_dir_value:
         p = Path(repo_dir_value)
         if not p.is_absolute() and repos_root is not None:
-            p = repos_root / p
+            rooted = repos_root / p
+            if rooted.is_dir():
+                return rooted
+            if p.parts and p.parts[0] == repos_root.name:
+                return repos_root.joinpath(*p.parts[1:])
+            p = rooted
         return p
     if repos_root is None or "__" not in instance_id:
         return None
@@ -205,6 +221,16 @@ def run(
     top_k_str: str = typer.Option("5", "--top-k", "-k", help="Comma-separated top_k values, e.g. 5,10,20"),
     chunk_size: int = typer.Option(80, "--chunk-size", help="Chunk size (lines)"),
     chunk_overlap: int = typer.Option(20, "--chunk-overlap", help="Chunk overlap"),
+    codenib_auto_index: bool = typer.Option(
+        True,
+        "--codenib-auto-index/--no-codenib-auto-index",
+        help="Build or update CodeNib's BM25 view before each case.",
+    ),
+    codenib_rebuild: bool = typer.Option(
+        False,
+        "--codenib-rebuild/--no-codenib-rebuild",
+        help="Force CodeNib to rebuild BM25 instead of reusing a current view.",
+    ),
     rag_endpoint: str | None = typer.Option(None, "--rag-endpoint"),
     rag_api_key: str | None = typer.Option(None, "--rag-api-key"),
     potion_model_path: str = typer.Option(
@@ -356,6 +382,23 @@ def run(
             return None if skip_missing_repo else []
         explorer = LineBM25Explorer(rd, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         results = explorer.explore(instance_id=rec["instance_id"], query=_get_issue(rec), top_k=max_top_k)
+        return _results_to_regions(results)
+
+    def codenib_method(rec: dict) -> list[tuple[str, int, int]] | None:
+        from explorers.codenib_explorer import CodeNibExplorer
+        rd = _get_repo_dir(rec)
+        if rd is None:
+            return None if skip_missing_repo else []
+        explorer = CodeNibExplorer(
+            rd,
+            auto_index=codenib_auto_index,
+            rebuild=codenib_rebuild,
+        )
+        results = explorer.explore(
+            instance_id=rec["instance_id"],
+            query=_get_issue(rec),
+            top_k=max_top_k,
+        )
         return _results_to_regions(results)
 
     def rag_method(rec: dict) -> list[tuple[str, int, int]] | None:
@@ -573,6 +616,7 @@ def run(
 
     METHOD_MAP: dict[str, Callable] = {
         "bm25": bm25_method,
+        "codenib": codenib_method,
         "rag": rag_method,
         "tfidf": tfidf_method,
         "potion": potion_method,
