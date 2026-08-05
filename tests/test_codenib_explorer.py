@@ -10,10 +10,12 @@ from explorers.codenib_explorer import CodeNibExplorer
 
 class _Delegate:
     repo_root = None
+    policy = None
 
     @classmethod
-    def from_repository(cls, repo_root):
+    def from_repository(cls, repo_root, *, policy):
         cls.repo_root = repo_root
+        cls.policy = policy
         return cls()
 
     def explore(self, *, instance_id, query, top_k):
@@ -58,6 +60,7 @@ def test_wrapper_preserves_official_region_contract(monkeypatch, tmp_path):
     results = explorer.explore(instance_id="org__repo-1", query="find parser", top_k=3)
 
     assert _Delegate.repo_root == tmp_path.resolve()
+    assert _Delegate.policy == "bm25"
     assert len(results) == 1
     assert results[0].score == 0.75
     assert results[0].regions[0].path == "src/parser.py"

@@ -1,4 +1,4 @@
-"""CodeNib's manifest-backed BM25 explorer for SWE-Explore."""
+"""Run CodeNib's native repository explorer under SWE-Explore's protocol."""
 
 from __future__ import annotations
 
@@ -10,9 +10,10 @@ from .base import ContextRegion, Explorer, ExplorerResult
 class CodeNibExplorer(Explorer):
     """Adapt CodeNib's native explorer to SWE-Explore's local protocol.
 
-    Index construction is explicit at this boundary.  ``auto_index=True``
-    materializes or updates only CodeNib's BM25 view before the first query;
-    ``False`` requires a current manifest for the checkout.
+    This integration fixes CodeNib's policy to ``bm25`` as a low-dependency
+    compatibility arm. Index construction is explicit at this boundary:
+    ``auto_index=True`` materializes or updates only that view before the first
+    query; ``False`` requires a current manifest for the checkout.
     """
 
     def __init__(
@@ -43,7 +44,10 @@ class CodeNibExplorer(Explorer):
                 raise RuntimeError(
                     "CodeNib failed to materialize required views: " + ", ".join(failed)
                 )
-        self._delegate = CodeNibSWEExploreExplorer.from_repository(self.repo_root)
+        self._delegate = CodeNibSWEExploreExplorer.from_repository(
+            self.repo_root,
+            policy="bm25",
+        )
 
     def explore(
         self, *, instance_id: str, query: str, top_k: int = 5
