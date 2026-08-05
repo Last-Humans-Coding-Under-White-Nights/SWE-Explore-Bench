@@ -163,6 +163,12 @@ arm for SWE-Explore; CodeNib's dense, hybrid, reranked, and graph policies
 remain available through its own runtime. Install CodeNib separately, then let
 the runner materialize the BM25 view or reuse an existing manifest:
 
+The same CodeNib runtime also provides revision-pinned integration contracts
+for LocAgent, Agentless v1.5.0, CoSIL, and OrcaLoca SearchAgent without building
+an agent-specific index. See CodeNib's
+[agent integration matrix](https://docs.codenib.ai/agent_integrations/) for the
+provider, policy, evaluation, and fidelity boundary of each integration.
+
 ```bash
 uv pip install codenib
 uv run python eval_runner.py \
