@@ -157,11 +157,8 @@ Available explorers include:
 Agent explorers can be routed through one OpenAI-compatible endpoint with `--academic-api-base`, `--academic-api-key`, and `--academic-model`; see `.env.example` and `configs/litellm_proxy.yaml`.
 
 The optional `codenib` explorer runs
-[CodeNib](https://github.com/sysevol-ai/CodeNib)'s native repository explorer
-with its manifest-backed `bm25` policy. This is a low-dependency compatibility
-arm for SWE-Explore; CodeNib's dense, hybrid, reranked, and graph policies
-remain available through its own runtime. Install CodeNib separately, then let
-the runner materialize the BM25 view or reuse an existing manifest:
+[CodeNib](https://github.com/sysevol-ai/CodeNib)'s native repository explorer.
+The default `bm25` policy is the measured, low-dependency compatibility control:
 
 The same CodeNib runtime also provides revision-pinned integration contracts
 for LocAgent, Agentless v1.5.0, CoSIL, and OrcaLoca SearchAgent without building
@@ -181,10 +178,30 @@ uv run python eval_runner.py \
 ```
 
 Pass `--no-codenib-auto-index` to require a current, prebuilt CodeNib manifest.
-This integration explicitly selects `policy="bm25"`, so graph, vector, and
-Zoekt views are not required or loaded. The runner accepts either the workspace
-containing the `repos/` paths recorded in the benchmark or the `repos/`
-directory itself.
+Use `--codenib-policy` to select `auto`, `dense`, `hybrid`, `hybrid_rerank`, or
+`graph`; the runner asks CodeNib which manifest views that policy requires and
+materializes only those views. Dense and hybrid policies require
+`codenib[semantic]`, graph requires `codenib[graph]`, and `auto` can use
+`codenib[full]`. Optional `--codenib-planning-budget` and
+`--codenib-retrieval-level` controls are recorded in every result row. For
+example:
+
+```bash
+uv pip install "codenib[full]"
+uv run python eval_runner.py \
+  --bench bench.final.public.jsonl \
+  --repos repos \
+  --issue-map issue_map.json \
+  --explorers codenib \
+  --codenib-policy auto \
+  --top-k 5 \
+  --output "results/{explorer}/top{k}.jsonl"
+```
+
+The runner accepts either the workspace containing the `repos/` paths recorded
+in the benchmark or the `repos/` directory itself. Only the published BM25 arm
+has measured results in this PR; other policies require new runs rather than
+backfilled scores.
 
 ## Build the Benchmark From Trajectories
 

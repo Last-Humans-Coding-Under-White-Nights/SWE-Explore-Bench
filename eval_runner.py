@@ -224,12 +224,30 @@ def run(
     codenib_auto_index: bool = typer.Option(
         True,
         "--codenib-auto-index/--no-codenib-auto-index",
-        help="Build or update CodeNib's BM25 view before each case.",
+        help="Build or update the CodeNib views required by --codenib-policy.",
     ),
     codenib_rebuild: bool = typer.Option(
         False,
         "--codenib-rebuild/--no-codenib-rebuild",
-        help="Force CodeNib to rebuild BM25 instead of reusing a current view.",
+        help="Force CodeNib to rebuild required views instead of reusing them.",
+    ),
+    codenib_policy: str = typer.Option(
+        "bm25",
+        "--codenib-policy",
+        help=(
+            "CodeNib policy: auto, bm25, dense, hybrid, hybrid_rerank, or graph. "
+            "The published compatibility control uses bm25."
+        ),
+    ),
+    codenib_planning_budget: str = typer.Option(
+        "balanced",
+        "--codenib-planning-budget",
+        help="CodeNib planning budget: fast, balanced, or thorough.",
+    ),
+    codenib_retrieval_level: str = typer.Option(
+        "l2",
+        "--codenib-retrieval-level",
+        help="CodeNib dense retrieval level: l0 or l2.",
     ),
     rag_endpoint: str | None = typer.Option(None, "--rag-endpoint"),
     rag_api_key: str | None = typer.Option(None, "--rag-api-key"),
@@ -350,6 +368,25 @@ def run(
     if unknown:
         console.print(f"[red]Unknown explorers: {unknown}[/red]")
         raise typer.Exit(1)
+    if "codenib" in explorer_names:
+        try:
+            from codenib.agent import normalize_repository_explorer_policy
+
+            codenib_policy = normalize_repository_explorer_policy(codenib_policy)
+        except (ImportError, ValueError) as exc:
+            console.print(f"[red]Invalid CodeNib setup or policy: {exc}[/red]")
+            raise typer.Exit(1) from exc
+        if codenib_planning_budget not in {"fast", "balanced", "thorough"}:
+            console.print("[red]Invalid CodeNib planning budget[/red]")
+            raise typer.Exit(1)
+        if codenib_retrieval_level not in {"l0", "l2"}:
+            console.print("[red]Invalid CodeNib retrieval level[/red]")
+            raise typer.Exit(1)
+        console.print(
+            "[dim]CodeNib configuration: "
+            f"policy={codenib_policy}, budget={codenib_planning_budget}, "
+            f"level={codenib_retrieval_level}[/dim]"
+        )
 
     # ── shared model caches (survive across instances) ──
     _potion_model = None
@@ -389,16 +426,19 @@ def run(
         rd = _get_repo_dir(rec)
         if rd is None:
             return None if skip_missing_repo else []
-        explorer = CodeNibExplorer(
+        with CodeNibExplorer(
             rd,
             auto_index=codenib_auto_index,
             rebuild=codenib_rebuild,
-        )
-        results = explorer.explore(
-            instance_id=rec["instance_id"],
-            query=_get_issue(rec),
-            top_k=max_top_k,
-        )
+            policy=codenib_policy,
+            planning_budget=codenib_planning_budget,
+            retrieval_level=codenib_retrieval_level,
+        ) as explorer:
+            results = explorer.explore(
+                instance_id=rec["instance_id"],
+                query=_get_issue(rec),
+                top_k=max_top_k,
+            )
         return _results_to_regions(results)
 
     def rag_method(rec: dict) -> list[tuple[str, int, int]] | None:
@@ -734,6 +774,12 @@ def run(
                     "metrics": scores_per_k[k],
                     "num_regions": min(len(preds), k),
                 }
+                if name == "codenib":
+                    row["explorer_config"] = {
+                        "policy": codenib_policy,
+                        "planning_budget": codenib_planning_budget,
+                        "retrieval_level": codenib_retrieval_level,
+                    }
                 for m in METRICS:
                     per_k_totals[k][m] += scores_per_k[k][m]
                 per_k_evaluated[k] += 1
