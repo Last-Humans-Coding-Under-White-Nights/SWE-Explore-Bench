@@ -167,7 +167,8 @@ an agent-specific index. See CodeNib's
 provider, policy, evaluation, and fidelity boundary of each integration.
 
 ```bash
-uv pip install codenib
+uv pip install \
+  "codenib @ git+https://github.com/sysevol-ai/CodeNib.git@99375dc88e22e6f7e23b764665b3edb20ee2893d"
 uv run python eval_runner.py \
   --bench bench.final.public.jsonl \
   --repos repos \
@@ -187,7 +188,8 @@ materializes only those views. Dense and hybrid policies require
 example:
 
 ```bash
-uv pip install "codenib[full]"
+uv pip install \
+  "codenib[full] @ git+https://github.com/sysevol-ai/CodeNib.git@99375dc88e22e6f7e23b764665b3edb20ee2893d"
 uv run python eval_runner.py \
   --bench bench.final.public.jsonl \
   --repos repos \
@@ -202,6 +204,10 @@ The runner accepts either the workspace containing the `repos/` paths recorded
 in the benchmark or the `repos/` directory itself. Only the published BM25 arm
 has measured results in this PR; other policies require new runs rather than
 backfilled scores.
+
+The pinned Git install is temporary: PyPI `codenib==0.1.0` predates the
+SWE-Explore compatibility API and native multi-view explorer. Replace it with
+the next CodeNib package release once that release is available.
 
 ## Build the Benchmark From Trajectories
 
