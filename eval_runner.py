@@ -45,7 +45,18 @@ METRICS = [
     "first_useful_hit",
 ]
 
-LOCAL_EXPLORERS = {"bm25", "rag", "tfidf", "potion", "simple_rule", "oracle", "random", "embed", "swerank"}
+LOCAL_EXPLORERS = {
+    "bm25",
+    "codenib",
+    "rag",
+    "tfidf",
+    "potion",
+    "simple_rule",
+    "oracle",
+    "random",
+    "embed",
+    "swerank",
+}
 AGENTIC_EXPLORERS = {"claude_code", "cursor"}
 ACADEMIC_EXPLORERS = {"autocr", "cosil", "locagent", "orcaloca", "mini_swe_agent", "awe_agent"}
 ALL_EXPLORERS = LOCAL_EXPLORERS | AGENTIC_EXPLORERS | ACADEMIC_EXPLORERS
@@ -86,7 +97,12 @@ def _resolve_repo_dir(
     if repo_dir_value:
         p = Path(repo_dir_value)
         if not p.is_absolute() and repos_root is not None:
-            p = repos_root / p
+            rooted = repos_root / p
+            if rooted.is_dir():
+                return rooted
+            if p.parts and p.parts[0] == repos_root.name:
+                return repos_root.joinpath(*p.parts[1:])
+            p = rooted
         return p
     if repos_root is None or "__" not in instance_id:
         return None
@@ -205,6 +221,34 @@ def run(
     top_k_str: str = typer.Option("5", "--top-k", "-k", help="Comma-separated top_k values, e.g. 5,10,20"),
     chunk_size: int = typer.Option(80, "--chunk-size", help="Chunk size (lines)"),
     chunk_overlap: int = typer.Option(20, "--chunk-overlap", help="Chunk overlap"),
+    codenib_auto_index: bool = typer.Option(
+        True,
+        "--codenib-auto-index/--no-codenib-auto-index",
+        help="Build or update the CodeNib views required by --codenib-policy.",
+    ),
+    codenib_rebuild: bool = typer.Option(
+        False,
+        "--codenib-rebuild/--no-codenib-rebuild",
+        help="Force CodeNib to rebuild required views instead of reusing them.",
+    ),
+    codenib_policy: str = typer.Option(
+        "bm25",
+        "--codenib-policy",
+        help=(
+            "CodeNib policy: auto, bm25, dense, hybrid, hybrid_rerank, or graph. "
+            "The published compatibility control uses bm25."
+        ),
+    ),
+    codenib_planning_budget: str = typer.Option(
+        "balanced",
+        "--codenib-planning-budget",
+        help="CodeNib planning budget: fast, balanced, or thorough.",
+    ),
+    codenib_retrieval_level: str = typer.Option(
+        "l2",
+        "--codenib-retrieval-level",
+        help="CodeNib dense retrieval level: l0 or l2.",
+    ),
     rag_endpoint: str | None = typer.Option(None, "--rag-endpoint"),
     rag_api_key: str | None = typer.Option(None, "--rag-api-key"),
     potion_model_path: str = typer.Option(
@@ -324,6 +368,25 @@ def run(
     if unknown:
         console.print(f"[red]Unknown explorers: {unknown}[/red]")
         raise typer.Exit(1)
+    if "codenib" in explorer_names:
+        try:
+            from codenib.agent import normalize_repository_explorer_policy
+
+            codenib_policy = normalize_repository_explorer_policy(codenib_policy)
+        except (ImportError, ValueError) as exc:
+            console.print(f"[red]Invalid CodeNib setup or policy: {exc}[/red]")
+            raise typer.Exit(1) from exc
+        if codenib_planning_budget not in {"fast", "balanced", "thorough"}:
+            console.print("[red]Invalid CodeNib planning budget[/red]")
+            raise typer.Exit(1)
+        if codenib_retrieval_level not in {"l0", "l2"}:
+            console.print("[red]Invalid CodeNib retrieval level[/red]")
+            raise typer.Exit(1)
+        console.print(
+            "[dim]CodeNib configuration: "
+            f"policy={codenib_policy}, budget={codenib_planning_budget}, "
+            f"level={codenib_retrieval_level}[/dim]"
+        )
 
     # ── shared model caches (survive across instances) ──
     _potion_model = None
@@ -356,6 +419,26 @@ def run(
             return None if skip_missing_repo else []
         explorer = LineBM25Explorer(rd, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
         results = explorer.explore(instance_id=rec["instance_id"], query=_get_issue(rec), top_k=max_top_k)
+        return _results_to_regions(results)
+
+    def codenib_method(rec: dict) -> list[tuple[str, int, int]] | None:
+        from explorers.codenib_explorer import CodeNibExplorer
+        rd = _get_repo_dir(rec)
+        if rd is None:
+            return None if skip_missing_repo else []
+        with CodeNibExplorer(
+            rd,
+            auto_index=codenib_auto_index,
+            rebuild=codenib_rebuild,
+            policy=codenib_policy,
+            planning_budget=codenib_planning_budget,
+            retrieval_level=codenib_retrieval_level,
+        ) as explorer:
+            results = explorer.explore(
+                instance_id=rec["instance_id"],
+                query=_get_issue(rec),
+                top_k=max_top_k,
+            )
         return _results_to_regions(results)
 
     def rag_method(rec: dict) -> list[tuple[str, int, int]] | None:
@@ -573,6 +656,7 @@ def run(
 
     METHOD_MAP: dict[str, Callable] = {
         "bm25": bm25_method,
+        "codenib": codenib_method,
         "rag": rag_method,
         "tfidf": tfidf_method,
         "potion": potion_method,
@@ -690,6 +774,12 @@ def run(
                     "metrics": scores_per_k[k],
                     "num_regions": min(len(preds), k),
                 }
+                if name == "codenib":
+                    row["explorer_config"] = {
+                        "policy": codenib_policy,
+                        "planning_budget": codenib_planning_budget,
+                        "retrieval_level": codenib_retrieval_level,
+                    }
                 for m in METRICS:
                     per_k_totals[k][m] += scores_per_k[k][m]
                 per_k_evaluated[k] += 1
