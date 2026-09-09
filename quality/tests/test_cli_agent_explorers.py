@@ -147,13 +147,13 @@ class CliAgentExplorerContractTest(unittest.TestCase):
     def test_explore_exports_config_dir_without_copying_it(self) -> None:
         for case in CLI_EXPLORER_CASES:
             with self.subTest(explorer=case.explorer_cls.__name__):
-                # Created under cwd so a relative path can be passed in,
-                # proving the explorer resolves it before exporting it.
                 with tempfile.TemporaryDirectory() as repo, \
-                        tempfile.TemporaryDirectory(dir=".") as cfg:
+                        tempfile.TemporaryDirectory() as cfg:
                     (Path(cfg) / case.expected_config_filename).write_text(
                         "{}", encoding="utf-8"
                     )
+                    (Path(cfg) / "sub").mkdir()
+                    unnormalised = Path(cfg) / "sub" / ".."
                     seen: dict[str, object] = {}
 
                     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
@@ -163,7 +163,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                     explorer = case.explorer_cls(
                         repo_root=Path(repo),
                         bin_path=case.bin_path,
-                        config_dir=Path(os.path.relpath(cfg)),
+                        config_dir=unnormalised,
                     )
                     with patch(
                         "explorers._cli_agent_base.subprocess.run", side_effect=fake_run
