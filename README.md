@@ -86,7 +86,7 @@ Requirements:
 - Python 3.12+
 - `uv` for environment management
 - An OpenAI-compatible endpoint for LLM line refinement or agent explorers
-- Optional external CLIs/SDKs for agent explorers such as Claude Code, Cursor, AutoCodeRover, CoSIL, LocAgent, OrcaLoca, Mini-SWE-Agent, and AweAgent
+- Optional external CLIs/SDKs for agent explorers such as Claude Code, Cursor, OpenCode, DevEco Code, AutoCodeRover, CoSIL, LocAgent, OrcaLoca, Mini-SWE-Agent, and AweAgent
 
 ### 2. Download the benchmark
 
@@ -151,7 +151,7 @@ Available explorers include:
 | --- | --- |
 | Local retrieval | `bm25`, `codenib`, `tfidf`, `potion`, `rag`, `embed`, `swerank` |
 | Simple baselines | `oracle`, `random`, `simple_rule` |
-| Agentic CLIs | `claude_code`, `cursor` |
+| Agentic CLIs | `claude_code`, `cursor`, `opencode`, `deveco` |
 | Academic agents | `autocr`, `cosil`, `locagent`, `orcaloca`, `mini_swe_agent`, `awe_agent` |
 
 Agent explorers can be routed through one OpenAI-compatible endpoint with `--academic-api-base`, `--academic-api-key`, and `--academic-model`; see `.env.example` and `configs/litellm_proxy.yaml`.
