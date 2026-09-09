@@ -55,17 +55,22 @@ def _extract_output_text(raw: str) -> str:
         except json.JSONDecodeError:
             # One malformed event must not discard the rest of the stream.
             continue
+        if not isinstance(event, dict) or "type" not in event:
+            continue
         saw_event = True
-        if isinstance(event, dict) and event.get("type") == "text":
-            text = (event.get("part") or {}).get("text", "")
-            if text:
-                texts.append(text)
+        if event["type"] != "text":
+            continue
+        part = event.get("part")
+        if isinstance(part, str):
+            texts.append(part)
+        elif isinstance(part, dict) and part.get("text"):
+            texts.append(part["text"])
 
     if not texts:
         return "" if saw_event else raw
-    for text in reversed(texts):
-        if ANSWER_MARKER in text:
-            return text
+    for i in reversed(range(len(texts))):
+        if ANSWER_MARKER in texts[i]:
+            return "\n".join(texts[i:])
     return texts[-1]
 
 
@@ -134,6 +139,7 @@ class BaseCliAgentExplorer(Explorer):
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     timeout=self.timeout if self.timeout > 0 else None,
                     env=env,
                 )

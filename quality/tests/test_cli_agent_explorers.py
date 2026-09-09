@@ -22,6 +22,7 @@ from explorers._cli_agent_base import (
 )
 from explorers.deveco import DevEcoExplorer
 from explorers.opencode import OpenCodeExplorer
+from explorers.parsing import parse_relevant_files
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -320,6 +321,28 @@ class ExtractOutputTextTest(unittest.TestCase):
                         "part": {"text": "RELEVANT_FILES:\n- a.py:1-2"}}),
         ])
         self.assertEqual(_extract_output_text(raw), "RELEVANT_FILES:\n- a.py:1-2")
+
+    def test_answer_split_across_events_is_joined(self) -> None:
+        """The list can arrive after the header; returning only the header
+        that matched the marker would yield no regions at all."""
+        raw = "\n".join([
+            json.dumps({"type": "text", "part": {"text": "RELEVANT_FILES:"}}),
+            json.dumps({"type": "text", "part": {"text": "- a.py:1-2\n- b.py:3-4"}}),
+        ])
+        out = _extract_output_text(raw)
+        self.assertEqual(out, "RELEVANT_FILES:\n- a.py:1-2\n- b.py:3-4")
+        self.assertEqual(len(parse_relevant_files(out, "i", top_k=5)), 2)
+
+    def test_string_part_is_accepted(self) -> None:
+        """A string ``part`` used to raise AttributeError out of explore()."""
+        raw = json.dumps({"type": "text", "part": "RELEVANT_FILES:\n- a.py:1-2"})
+        self.assertEqual(_extract_output_text(raw), "RELEVANT_FILES:\n- a.py:1-2")
+
+    def test_stray_json_line_does_not_discard_plain_text(self) -> None:
+        """A log line is not a protocol event, so it must not suppress the
+        plain-text answer that follows it."""
+        raw = '{"level":"info","msg":"telemetry ping"}\nRELEVANT_FILES:\n- a.py:1-2'
+        self.assertEqual(len(parse_relevant_files(_extract_output_text(raw), "i")), 1)
 
     def test_decoy_in_tool_event_does_not_win(self) -> None:
         raw = "\n".join([
