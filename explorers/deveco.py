@@ -32,8 +32,9 @@ ISSUE:
 class DevEcoExplorer(BaseCliAgentExplorer):
     """DevEco Code CLI explorer for local codebases.
 
-    Uses ``deveco run --format json --dir ... <prompt>`` and parses the final
-    response for the shared ``RELEVANT_FILES`` output contract.
+    Uses ``deveco run --format json --dir ...`` with the prompt on stdin, and
+    parses the final response for the shared ``RELEVANT_FILES`` output
+    contract.
     """
 
     bin_path: str = "deveco"
