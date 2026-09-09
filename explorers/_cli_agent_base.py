@@ -147,8 +147,8 @@ class BaseCliAgentExplorer(Explorer):
                 )
 
         if completed.returncode != 0:
-            stdout_preview = (completed.stdout or "")[:2000]
-            stderr_preview = (completed.stderr or "")[:2000]
+            stdout_preview = (completed.stdout or "")[-2000:]
+            stderr_preview = (completed.stderr or "")[-2000:]
             detail = stderr_preview
             if stdout_preview:
                 detail = f"STDOUT:\n{stdout_preview}\nSTDERR:\n{stderr_preview}"
