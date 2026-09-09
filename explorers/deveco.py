@@ -44,7 +44,11 @@ class DevEcoExplorer(BaseCliAgentExplorer):
     cli_display_name: ClassVar[str] = "deveco CLI"
     config_env_var: ClassVar[str] = "DEVECO_CONFIG_DIR"
     config_filename: ClassVar[str] = "deveco.json"
-    local_config_dirname: ClassVar[str] = ".deveco"
+    config_override_vars: ClassVar[tuple[str, ...]] = (
+        "DEVECO_CONFIG",
+        "DEVECO_CONFIG_CONTENT",
+        "DEVECO_CONFIG_DIR",
+    )
     install_hint: ClassVar[str] = (
         "Install and configure the `deveco` binary, or pass --deveco-bin."
     )

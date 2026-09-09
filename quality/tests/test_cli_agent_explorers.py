@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Callable, Type
 from unittest.mock import patch
 
-from explorers._cli_agent_base import BaseCliAgentExplorer, _extract_output_text
+from explorers._cli_agent_base import (
+    XDG_VARS,
+    BaseCliAgentExplorer,
+    _extract_output_text,
+)
 from explorers.deveco import DevEcoExplorer
 from explorers.opencode import OpenCodeExplorer
 
@@ -36,7 +40,7 @@ class CliExplorerCase:
     build_expected_cmd: Callable[[str, str], list[str]]
     expected_config_env_var: str
     expected_config_filename: str
-    expected_local_config_dirname: str
+    expected_override_vars: tuple[str, ...]
     missing_binary_pattern: str
 
 
@@ -49,7 +53,8 @@ CLI_EXPLORER_CASES = (
         ],
         expected_config_env_var="OPENCODE_CONFIG_DIR",
         expected_config_filename="opencode.json",
-        expected_local_config_dirname=".opencode",
+        expected_override_vars=("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT",
+                                "OPENCODE_CONFIG_DIR"),
         missing_binary_pattern="OpenCode CLI not found",
     ),
     CliExplorerCase(
@@ -61,7 +66,8 @@ CLI_EXPLORER_CASES = (
         ],
         expected_config_env_var="DEVECO_CONFIG_DIR",
         expected_config_filename="deveco.json",
-        expected_local_config_dirname=".deveco",
+        expected_override_vars=("DEVECO_CONFIG", "DEVECO_CONFIG_CONTENT",
+                                "DEVECO_CONFIG_DIR"),
         missing_binary_pattern="deveco CLI not found",
     ),
 )
@@ -106,7 +112,11 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                     self.assertEqual(results[0].regions[0].start, 10)
                     self.assertEqual(results[0].regions[0].end, 20)
 
-    def test_explore_isolates_home_from_the_operator_environment(self) -> None:
+    def test_explore_isolates_config_discovery_from_inherited_env(self) -> None:
+        """A temporary HOME alone is not isolation.
+        XDG paths and the CLI's own override variables each redirect config
+        discovery past HOME, so all of them must be cleared too.
+        """
         for case in CLI_EXPLORER_CASES:
             with self.subTest(explorer=case.explorer_cls.__name__):
                 with tempfile.TemporaryDirectory() as repo:
@@ -116,19 +126,25 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         seen["env"] = kwargs["env"]
                         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
+                    redirects = XDG_VARS + case.expected_override_vars
+                    inherited = dict(os.environ, HOME="/user")
+                    inherited.update({var: "/user/leaked" for var in redirects})
+
                     explorer = case.explorer_cls(
                         repo_root=Path(repo), bin_path=case.bin_path
                     )
-                    with patch(
+                    with patch.dict(os.environ, inherited, clear=True), patch(
                         "explorers._cli_agent_base.subprocess.run", side_effect=fake_run
                     ):
                         explorer.explore(instance_id="inst-1", query="issue")
 
                     env = seen["env"]
-                    self.assertNotEqual(env["HOME"], os.environ.get("HOME"))  # type: ignore[index]
+                    self.assertNotEqual(env["HOME"], "/user")  # type: ignore[index]
                     self.assertEqual(env["HOME"], env["USERPROFILE"])  # type: ignore[index]
+                    for var in redirects:
+                        self.assertNotIn(var, env)  # type: ignore[operator]
 
-    def test_explore_exports_config_dir_and_copies_config_into_repo(self) -> None:
+    def test_explore_exports_config_dir_without_copying_it(self) -> None:
         for case in CLI_EXPLORER_CASES:
             with self.subTest(explorer=case.explorer_cls.__name__):
                 # Created under cwd so a relative path can be passed in,
@@ -158,9 +174,8 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         seen["env"][case.expected_config_env_var],  # type: ignore[index]
                         str(Path(cfg).resolve()),
                     )
-                    copied = (Path(repo) / case.expected_local_config_dirname
-                              / case.expected_config_filename)
-                    self.assertTrue(copied.exists())
+                    # A copy elsewhere breaks {file:./...} references
+                    self.assertEqual(list(Path(repo).iterdir()), [])
 
     def test_missing_config_file_raises_file_not_found(self) -> None:
         for case in CLI_EXPLORER_CASES:

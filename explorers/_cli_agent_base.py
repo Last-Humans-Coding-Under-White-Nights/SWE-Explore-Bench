@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -35,6 +34,8 @@ ISSUE:
 
 
 ANSWER_MARKER = "RELEVANT_FILES:"
+
+XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
 
 def _extract_output_text(raw: str) -> str:
@@ -82,9 +83,10 @@ class BaseCliAgentExplorer(Explorer):
     cli_display_name: ClassVar[str] = "CLI agent"
     config_env_var: ClassVar[str] = ""
     config_filename: ClassVar[str] = ""
-    local_config_dirname: ClassVar[str] = ""
     install_hint: ClassVar[str] = ""
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
+
+    config_override_vars: ClassVar[tuple[str, ...]] = ()
 
     def build_cmd(self) -> list[str]:
         """Return the argv for one run. The prompt is delivered on stdin."""
@@ -95,17 +97,22 @@ class BaseCliAgentExplorer(Explorer):
             issue=query, top_k=top_k, prompt_additions=self.prompt_additions
         ).strip()
 
+    def _isolate_env(self, env: dict[str, str], tmp_home: Path) -> None:
+        """Redirect config discovery to an empty temporary home."""
+        env["HOME"] = str(tmp_home)
+        env["USERPROFILE"] = str(tmp_home)
+        # Unset, so each of these defaults to a path under HOME (tempdir)
+        for var in XDG_VARS + self.config_override_vars:
+            env.pop(var, None)
+
     def _prepare_config(self, env: dict[str, str]) -> None:
-        """Point the CLI at ``config_dir`` via both discovery paths."""
+        """Select ``config_dir`` as the CLI's profile."""
         if self.config_dir is None:
             return
-        env[self.config_env_var] = str(self.config_dir.resolve())
         config_src = self.config_dir / self.config_filename
         if not config_src.exists():
             raise FileNotFoundError(f"{self.config_filename} not found at {config_src}")
-        config_dst = self.repo_root / self.local_config_dirname
-        config_dst.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(config_src, config_dst / self.config_filename)
+        env[self.config_env_var] = str(self.config_dir.resolve())
 
     def explore(
         self, *, instance_id: str, query: str, top_k: int = 5
@@ -116,8 +123,7 @@ class BaseCliAgentExplorer(Explorer):
 
         # A temp HOME keeps the run from picking up the user's own config.
         with tempfile.TemporaryDirectory(prefix="cli-agent-home-") as tmp_home:
-            env["HOME"] = tmp_home
-            env["USERPROFILE"] = tmp_home
+            self._isolate_env(env, Path(tmp_home))
             self._prepare_config(env)
 
             try:

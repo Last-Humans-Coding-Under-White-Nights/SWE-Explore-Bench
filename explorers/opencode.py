@@ -42,7 +42,11 @@ class OpenCodeExplorer(BaseCliAgentExplorer):
     cli_display_name: ClassVar[str] = "OpenCode CLI"
     config_env_var: ClassVar[str] = "OPENCODE_CONFIG_DIR"
     config_filename: ClassVar[str] = "opencode.json"
-    local_config_dirname: ClassVar[str] = ".opencode"
+    config_override_vars: ClassVar[tuple[str, ...]] = (
+        "OPENCODE_CONFIG",
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_CONFIG_DIR",
+    )
     install_hint: ClassVar[str] = (
         "Install and configure the `opencode` binary, or pass --opencode-bin."
     )
