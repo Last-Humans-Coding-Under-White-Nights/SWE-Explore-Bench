@@ -872,7 +872,8 @@ def run(
         primary_k = top_k_list[0]
         console.print(
             f"  [dim]case log tuple = (prec, recall, f1, in, out, think, total); "
-            f"second tuple = cumulative sum over evaluated cases @ top_k={primary_k}[/dim]"
+            f"aggr = metrics averaged, tokens summed over evaluated cases "
+            f"@ top_k={primary_k}[/dim]"
         )
 
         def _eval_one(
@@ -968,7 +969,7 @@ def run(
             elapsed: float,
             eta: float,
         ) -> None:
-            """Per-case progress log: case tuple, cumulative sums, timings."""
+            """Per-case progress log: case tuple, aggregates, timings."""
             case_u = usage if usage is not None else TokenUsage()
             case_vals = (
                 *case_scores,
@@ -977,10 +978,11 @@ def run(
                 case_u.reasoning_tokens,
                 case_u.total,
             )
-            sum_vals = (
-                per_k_totals[primary_k]["precision"],
-                per_k_totals[primary_k]["recall"],
-                per_k_totals[primary_k]["f1_score"],
+            n = per_k_evaluated[primary_k]
+            aggr_vals = (
+                per_k_totals[primary_k]["precision"] / n,
+                per_k_totals[primary_k]["recall"] / n,
+                per_k_totals[primary_k]["f1_score"] / n,
                 usage_totals.input_tokens,
                 usage_totals.output_tokens,
                 usage_totals.reasoning_tokens,
@@ -998,7 +1000,7 @@ def run(
             now = time.strftime("%H:%M:%S")
             sys.stderr.write(
                 f"\n  [{name} {now}] case {done}/{total_remaining} {iid}  "
-                f"case={fmt(case_vals)}  sum={fmt(sum_vals)}  "
+                f"case={fmt(case_vals)}  aggr={fmt(aggr_vals)}  "
                 f"time={case_dt:.0f}s elapsed={elapsed:.0f}s ETA={eta:.0f}s\n"
             )
             sys.stderr.flush()
