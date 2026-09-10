@@ -57,7 +57,7 @@ LOCAL_EXPLORERS = {
     "embed",
     "swerank",
 }
-AGENTIC_EXPLORERS = {"claude_code", "cursor"}
+AGENTIC_EXPLORERS = {"claude_code", "cursor", "opencode", "deveco"}
 ACADEMIC_EXPLORERS = {"autocr", "cosil", "locagent", "orcaloca", "mini_swe_agent", "awe_agent"}
 ALL_EXPLORERS = LOCAL_EXPLORERS | AGENTIC_EXPLORERS | ACADEMIC_EXPLORERS
 
@@ -258,6 +258,36 @@ def run(
     claude_timeout: int = typer.Option(600, "--claude-timeout"),
     cursor_api_key: str | None = typer.Option(None, "--cursor-api-key"),
     cursor_model: str | None = typer.Option(None, "--cursor-model"),
+    # ── opencode ──
+    opencode_bin: str = typer.Option("opencode", "--opencode-bin"),
+    opencode_timeout: int = typer.Option(600, "--opencode-timeout"),
+    opencode_config_dir: Path | None = typer.Option(
+        None, "--opencode-config-dir",
+        help="Directory containing OpenCode config such as opencode.json.",
+    ),
+    opencode_prompt_additions: str = typer.Option(
+        "", "--opencode-prompt-additions",
+        help="Extra instructions to append to the OpenCode prompt.",
+    ),
+    # ── deveco ──
+    deveco_bin: str = typer.Option("deveco", "--deveco-bin"),
+    deveco_timeout: int = typer.Option(600, "--deveco-timeout"),
+    deveco_config_dir: Path | None = typer.Option(
+        None, "--deveco-config-dir",
+        help="Directory containing DevEco Code config such as deveco.json.",
+    ),
+    deveco_prompt_additions: str = typer.Option(
+        "", "--deveco-prompt-additions",
+        help="Extra instructions to append to the DevEco Code prompt.",
+    ),
+    deveco_skip_permissions: bool = typer.Option(
+        True,
+        "--deveco-skip-permissions/--no-deveco-skip-permissions",
+        help=(
+            "Pass --dangerously-skip-permissions so unattended runs never block "
+            "on an approval prompt."
+        ),
+    ),
     # ── academic agents — all route through local LiteLLM proxy by default ──
     academic_model: str = typer.Option(
         "gpt-5.4", "--academic-model",
@@ -578,6 +608,33 @@ def run(
             ),
         )
 
+    def opencode_method(rec: dict) -> list[tuple[str, int, int]] | None:
+        from explorers.opencode import OpenCodeExplorer
+        return _agentic_method(
+            rec,
+            lambda rd: OpenCodeExplorer(
+                repo_root=rd,
+                bin_path=opencode_bin,
+                timeout=opencode_timeout,
+                config_dir=opencode_config_dir,
+                prompt_additions=opencode_prompt_additions,
+            ),
+        )
+
+    def deveco_method(rec: dict) -> list[tuple[str, int, int]] | None:
+        from explorers.deveco import DevEcoExplorer
+        return _agentic_method(
+            rec,
+            lambda rd: DevEcoExplorer(
+                repo_root=rd,
+                bin_path=deveco_bin,
+                timeout=deveco_timeout,
+                config_dir=deveco_config_dir,
+                prompt_additions=deveco_prompt_additions,
+                skip_permissions=deveco_skip_permissions,
+            ),
+        )
+
     # ── academic-agent methods ──
 
     def autocr_method(rec: dict) -> list[tuple[str, int, int]] | None:
@@ -667,6 +724,8 @@ def run(
         "swerank": swerank_method,
         "claude_code": claude_code_method,
         "cursor": cursor_method,
+        "opencode": opencode_method,
+        "deveco": deveco_method,
         "autocr": autocr_method,
         "cosil": cosil_method,
         "locagent": locagent_method,

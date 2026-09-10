@@ -35,3 +35,12 @@ scripts/run_openhands_upstream_to_downstream.py
 scripts/scaleup_live_handoff.py
 scripts/scaleup_live_pipeline.py
 scripts/compare_bench_spans.py
+
+
+# Secrets
+.env
+.env.local
+
+# Test suites
+!quality/tests/fixtures/*.jsonl
+
