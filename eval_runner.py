@@ -8,7 +8,10 @@ Usage:
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import signal
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +27,29 @@ from explorers.base import ExplorerResult
 
 app = typer.Typer(rich_markup_mode="rich")
 console = Console()
+
+
+@contextlib.contextmanager
+def _interruptible_pool(workers: int):
+    """A pool that drops its queued backlog on Ctrl+C, second Ctrl+C exits at once."""
+    previous = signal.getsignal(signal.SIGINT)
+    seen = False
+
+    def _handler(signum, frame):
+        nonlocal seen
+        if seen:
+            os._exit(130)
+        seen = True
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handler)
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        yield pool
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        signal.signal(signal.SIGINT, previous)
+
 
 METRICS = [
     "precision",
@@ -848,11 +874,29 @@ def run(
                     out_files[k].flush()
 
         done = 0
-        if workers > 1:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                futures = {pool.submit(_eval_one, rec): rec for rec in remaining_records}
-                for fut in as_completed(futures):
-                    iid, preds = fut.result()
+        interrupted = False
+        try:
+            if workers > 1:
+                with _interruptible_pool(workers) as pool:
+                    futures = {pool.submit(_eval_one, rec): rec for rec in remaining_records}
+                    for fut in as_completed(futures):
+                        iid, preds = fut.result()
+                        done += 1
+                        elapsed = time.time() - t0
+                        rate = done / elapsed if elapsed > 0 else 0
+                        eta = (total_remaining - done) / rate if rate > 0 else 0
+                        sys.stderr.write(
+                            f"\r  [{name}] {done}/{total_remaining}  "
+                            f"{rate:.1f} it/s  ETA {eta:.0f}s  "
+                        )
+                        sys.stderr.flush()
+                        if preds is None:
+                            skipped += 1
+                            continue
+                        _record_result(iid, preds)
+            else:
+                for rec in remaining_records:
+                    iid, preds = _eval_one(rec)
                     done += 1
                     elapsed = time.time() - t0
                     rate = done / elapsed if elapsed > 0 else 0
@@ -866,26 +910,24 @@ def run(
                         skipped += 1
                         continue
                     _record_result(iid, preds)
-        else:
-            for rec in remaining_records:
-                iid, preds = _eval_one(rec)
-                done += 1
-                elapsed = time.time() - t0
-                rate = done / elapsed if elapsed > 0 else 0
-                eta = (total_remaining - done) / rate if rate > 0 else 0
-                sys.stderr.write(
-                    f"\r  [{name}] {done}/{total_remaining}  "
-                    f"{rate:.1f} it/s  ETA {eta:.0f}s  "
-                )
-                sys.stderr.flush()
-                if preds is None:
-                    skipped += 1
-                    continue
-                _record_result(iid, preds)
+        except KeyboardInterrupt:
+            interrupted = True
 
         # Close output files
         for fh in out_files.values():
             fh.close()
+
+        if interrupted:
+            print(file=sys.stderr)
+            hint = (
+                "results flushed, rerun with --resume."
+                if out_files else "no output file, nothing was saved."
+            )
+            console.print(
+                f"  [yellow]Interrupted after {done}/{total_remaining} instances; "
+                f"{hint}[/yellow]"
+            )
+            raise typer.Exit(130)
 
         sys.stderr.write("\n")
         total_elapsed = time.time() - t0
