@@ -23,6 +23,7 @@ from rich.console import Console
 from rich.table import Table
 
 from eval import ExploreEvaluator
+from explorers._cli_agent_base import set_log_level
 from explorers.base import ExplorerResult
 from explorers.parsing import (
     TokenUsage,
@@ -385,6 +386,11 @@ def run(
         1, "--workers", "-w",
         help="Parallel workers (for all explorers)",
     ),
+    log_level: str = typer.Option(
+        "info", "--log",
+        help="Console log level: info, debug, or trace. Debug logs CLI-agent "
+        "launch/return; trace additionally dumps the agent output before parsing.",
+    ),
     limit: int | None = typer.Option(None, "--limit", "-n"),
     skip_missing_repo: bool = typer.Option(True, "--skip-missing-repo/--no-skip-missing-repo"),
     no_line_counts: bool = typer.Option(False, "--no-line-counts"),
@@ -422,6 +428,13 @@ def run(
     os.environ.setdefault("MSWEA_AZURE_ENDPOINT", os.environ.get("LLM_API_BASE", ""))
     os.environ.setdefault("MSWEA_MODEL_NAME", os.environ.get("LLM_DEPLOYMENT", "gpt-5.4"))
     os.environ.setdefault("MSWEA_API_VERSION", "2024-12-01-preview")
+
+    if log_level.lower() not in {"info", "debug", "trace"}:
+        console.print(
+            f"[red]Invalid --log level: {log_level} (info|debug|trace)[/red]"
+        )
+        raise typer.Exit(1)
+    set_log_level(log_level)
 
     # Capture token usage from in-process LLM calls (litellm-based agents).
     register_litellm_usage_callback()
@@ -982,8 +995,9 @@ def run(
                 ]
                 return "(" + ", ".join(parts) + ")"
 
+            now = time.strftime("%H:%M:%S")
             sys.stderr.write(
-                f"\n  [{name}] case {done}/{total_remaining} {iid}  "
+                f"\n  [{name} {now}] case {done}/{total_remaining} {iid}  "
                 f"case={fmt(case_vals)}  sum={fmt(sum_vals)}  "
                 f"time={case_dt:.0f}s elapsed={elapsed:.0f}s ETA={eta:.0f}s\n"
             )
