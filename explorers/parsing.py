@@ -1,13 +1,17 @@
 """Shared output-parsing utilities for agentic explorers."""
 from __future__ import annotations
 
+import contextvars
+import json
 import re
-from typing import List
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import Any, Iterator, List
 
 from .base import ContextRegion, ExplorerResult
 
 # File extensions we recognise in fallback regex
-_SRC_EXTS = r"py|js|ts|java|go|rs|c|cpp|h|rb|php|md|txt|toml|yaml|yml|json|rst|cfg|ini|sh"
+_SRC_EXTS = r"py|js|ts|java|go|rs|c|cpp|h|rb|php|md|txt|toml|yaml|yml|json|rst|cfg|ini|sh|ets"
 
 # Known absolute prefixes that agents may return (e.g. /opt/swe-explore/data/repos/xxx/...)
 _ABS_REPO_PATTERN = re.compile(
@@ -455,3 +459,275 @@ def parse_acr_bug_locations(
     if regions:
         return [ExplorerResult(instance_id=instance_id, score=1.0, regions=regions)]
     return []
+
+
+# ── Token usage extraction ─────────────────────────────────────────────
+#
+# Each explorer that touches an LLM parses its provider-specific output for
+# usage fields and reports a TokenUsage into the active per-case collector
+# (see ``usage_collector`` / ``report_usage``).  The runner sums usage per
+# case, writes it into the JSONL rows and prints totals at the end.
+
+
+@dataclass
+class TokenUsage:
+    """Token consumption for one exploration case.
+
+    Categories are non-overlapping where the provider allows it:
+    ``input`` excludes cached reads (for OpenAI-style ``prompt_tokens``
+    the cached part is subtracted), ``reasoning`` is the subset of
+    ``output`` reported separately by the provider.
+
+    ``reasoning_separate`` marks providers that report reasoning tokens on
+    top of ``output_tokens`` — e.g. Gemini's ``thoughts_token_count``
+    alongside ``candidates_token_count``, or agent CLIs such as OpenCode
+    whose ``tokens`` object carries ``output`` and ``reasoning`` as sibling
+    buckets (empirically the case for the GLM/Zai line, where reasoning
+    exceeds output, so it cannot be a subset). For OpenAI/Anthropic-style
+    schemas reasoning is already inside ``output`` and must not be added
+    a second time (see :attr:`total`).
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    reasoning_separate: bool = False
+
+    _CATEGORIES = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "reasoning_tokens",
+    )
+
+    def add(self, other: "TokenUsage | None") -> None:
+        if not other:
+            return
+        for cat in self._CATEGORIES:
+            setattr(self, cat, getattr(self, cat) + getattr(other, cat))
+        self.reasoning_separate = self.reasoning_separate or other.reasoning_separate
+
+    def has_any(self) -> bool:
+        return any(getattr(self, cat) for cat in self._CATEGORIES)
+
+    @property
+    def total(self) -> int:
+        """input + output (+ reasoning only when reported separately)."""
+        extra = self.reasoning_tokens if self.reasoning_separate else 0
+        return self.input_tokens + self.output_tokens + extra
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "input": self.input_tokens,
+            "output": self.output_tokens,
+            "cache_read": self.cache_read_tokens,
+            "cache_write": self.cache_write_tokens,
+            "reasoning": self.reasoning_tokens,
+            "total": self.total,
+            "reasoning_separate": self.reasoning_separate,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "TokenUsage | None":
+        if not isinstance(data, dict):
+            return None
+        return cls(
+            input_tokens=int(data.get("input") or 0),
+            output_tokens=int(data.get("output") or 0),
+            cache_read_tokens=int(data.get("cache_read") or 0),
+            cache_write_tokens=int(data.get("cache_write") or 0),
+            reasoning_tokens=int(data.get("reasoning") or 0),
+            reasoning_separate=bool(data.get("reasoning_separate")),
+        )
+
+
+# Normalised (lowercase, non-letters stripped) key aliases per category.
+_INPUT_KEYS = {"inputtokens", "prompttokens", "input", "prompttokencount"}
+# Input keys whose value already contains the cached-token portion.
+_CACHE_INCLUSIVE_INPUT_KEYS = {"prompttokens", "prompttokencount"}
+_OUTPUT_KEYS = {"outputtokens", "completiontokens", "output"}
+_SEPARATE_OUTPUT_KEYS = {
+    # Gemini-style: candidates + thoughts, reasoning not inside output
+    "candidatestokencount",
+    "candidates",
+}
+_CACHE_READ_KEYS = {
+    "cachereadinputtokens",
+    "cachereadtokens",
+    "cacheread",
+    "cachedtokens",
+    "cachedinputtokens",
+    "cachedcontenttokencount",
+}
+_CACHE_WRITE_KEYS = {
+    "cachecreationinputtokens",
+    "cachecreationtokens",
+    "cachewritetokens",
+    "cachewrite",
+}
+_REASONING_KEYS = {"reasoningtokens", "reasoning", "thoughtstokencount", "thoughts"}
+_MAX_SCAN_DEPTH = 12
+
+
+def _norm_key(key: Any) -> str:
+    return re.sub(r"[^a-z]", "", str(key).lower())
+
+
+def _scan_usage(obj: Any, usage: TokenUsage, state: dict, depth: int) -> None:
+    if depth > _MAX_SCAN_DEPTH:
+        return
+    if isinstance(obj, dict):
+        # A reasoning field directly inside the same usage object as an
+        # output field is a sibling bucket (opencode ``tokens``, Gemini
+        # ``usageMetadata``), not a subset of ``output``. Nested details
+        # (OpenAI ``completion_tokens_details.reasoning_tokens``) keep the
+        # inclusive OpenAI/Anthropic semantics.
+        normed_keys = {_norm_key(k) for k in obj}
+        sibling_reasoning = bool(normed_keys & _REASONING_KEYS)
+        for key, value in obj.items():
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)):
+                nk = _norm_key(key)
+                if nk in _INPUT_KEYS:
+                    usage.input_tokens += int(value)
+                    if nk in _CACHE_INCLUSIVE_INPUT_KEYS:
+                        state["prompt_includes_cache"] = True
+                elif nk in _OUTPUT_KEYS or nk in _SEPARATE_OUTPUT_KEYS:
+                    usage.output_tokens += int(value)
+                    if nk in _SEPARATE_OUTPUT_KEYS or sibling_reasoning:
+                        state["output_inclusive"] = False
+                    elif not state["output_seen"]:
+                        state["output_inclusive"] = True
+                    state["output_seen"] = True
+                elif nk in _CACHE_READ_KEYS:
+                    usage.cache_read_tokens += int(value)
+                elif nk in _CACHE_WRITE_KEYS:
+                    usage.cache_write_tokens += int(value)
+                elif nk in _REASONING_KEYS:
+                    usage.reasoning_tokens += int(value)
+            elif isinstance(value, dict):
+                nk = _norm_key(key)
+                if nk == "cache":
+                    # opencode-style nested counts: "cache": {"read": N, "write": N}
+                    cache_read = value.get("read")
+                    cache_write = value.get("write")
+                    if isinstance(cache_read, (int, float)) and not isinstance(cache_read, bool):
+                        usage.cache_read_tokens += int(cache_read)
+                    if isinstance(cache_write, (int, float)) and not isinstance(cache_write, bool):
+                        usage.cache_write_tokens += int(cache_write)
+                else:
+                    _scan_usage(value, usage, state, depth + 1)
+            elif isinstance(value, list):
+                _scan_usage(value, usage, state, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            _scan_usage(item, usage, state, depth + 1)
+    elif isinstance(obj, list):
+        for item in obj:
+            _scan_usage(item, usage, state, depth + 1)
+
+
+def extract_usage(obj: Any) -> TokenUsage:
+    """Recursively scan parsed JSON for token-usage fields.
+
+    Recognises common container names (``usage``, ``token_usage``,
+    ``total_usage``, ``llm_usage``, ``model_usage``, ``usage_metadata``, ...)
+    plus the field aliases used by Anthropic, OpenAI and LiteLLM:
+    ``input_tokens``/``prompt_tokens``, ``output_tokens``/
+    ``completion_tokens``, ``cache_read_*``/``cached_tokens``,
+    ``cache_creation_*`` and ``reasoning_tokens``.  Only numeric values are
+    collected, so text fields such as a reasoning transcript are ignored.
+
+    Sets ``reasoning_separate`` when the reasoning tokens are reported on
+    top of ``output`` — Gemini-style candidates/thoughts, opencode-style
+    ``tokens`` objects where ``output`` and ``reasoning`` are siblings, or
+    reasoning without any output field — so that :attr:`TokenUsage.total`
+    does not double-count them.
+    """
+    usage = TokenUsage()
+    state = {
+        "prompt_includes_cache": False,
+        "output_inclusive": False,
+        "output_seen": False,
+    }
+    _scan_usage(obj, usage, state, 0)
+    if state["prompt_includes_cache"] and usage.cache_read_tokens:
+        usage.input_tokens = max(0, usage.input_tokens - usage.cache_read_tokens)
+    if usage.reasoning_tokens and not state["output_inclusive"]:
+        usage.reasoning_separate = True
+    return usage
+
+
+def extract_usage_from_jsonl(raw: str) -> TokenUsage | None:
+    """Scan newline-delimited JSON events (agent CLI stdout) for usage."""
+    usage = TokenUsage()
+    found = False
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or not line.startswith(("{", "[")):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        part = extract_usage(event)
+        if part.has_any():
+            usage.add(part)
+            found = True
+    return usage if found else None
+
+
+_usage_collector_var: contextvars.ContextVar[TokenUsage | None] = (
+    contextvars.ContextVar("swe_explore_token_usage", default=None)
+)
+
+
+def report_usage(usage: TokenUsage | None) -> None:
+    """Accumulate *usage* into the active per-case collector (no-op if none)."""
+    if usage is None or not usage.has_any():
+        return
+    active = _usage_collector_var.get()
+    if active is not None:
+        active.add(usage)
+
+
+@contextmanager
+def usage_collector() -> Iterator[TokenUsage]:
+    """Collect all ``report_usage`` calls within the block (thread-safe:
+    each thread gets its own collector via contextvars)."""
+    tracker = TokenUsage()
+    token = _usage_collector_var.set(tracker)
+    try:
+        yield tracker
+    finally:
+        _usage_collector_var.reset(token)
+
+
+def register_litellm_usage_callback() -> None:
+    """Report in-process litellm completions (mini-swe-agent, LocAgent, ...)
+    into the active collector.  No-op when litellm is not installed."""
+    try:
+        import litellm
+    except Exception:
+        return
+    if getattr(litellm, "_swe_explore_usage_hook", False):
+        return
+
+    def _hook(kwargs, response, start_time, end_time, user_id=None):
+        resp_usage = getattr(response, "usage", None)
+        if resp_usage is None:
+            return
+        if hasattr(resp_usage, "model_dump"):
+            try:
+                resp_usage = resp_usage.model_dump()
+            except Exception:
+                return
+        if isinstance(resp_usage, dict):
+            report_usage(extract_usage(resp_usage))
+
+    litellm.success_callback.append(_hook)
+    litellm._swe_explore_usage_hook = True

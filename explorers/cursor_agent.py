@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import List
 
 from .base import ContextRegion, Explorer, ExplorerResult
-from .parsing import parse_relevant_files
+from .parsing import extract_usage, parse_relevant_files, report_usage
 
 EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
 source files and line ranges most relevant to understanding and fixing the
@@ -92,7 +92,11 @@ class CursorAgentExplorer(Explorer):
             data = json.loads(raw)
             output = data.get("result", "")
         except json.JSONDecodeError:
+            data = None
             output = raw
+
+        if isinstance(data, dict):
+            report_usage(extract_usage(data))
 
         if not output:
             return []

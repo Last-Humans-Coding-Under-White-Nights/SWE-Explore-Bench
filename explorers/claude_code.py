@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import List
 
 from .base import Explorer, ExplorerResult
-from .parsing import parse_relevant_files
+from .parsing import extract_usage, parse_relevant_files, report_usage
 
 EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
 source files and line ranges most relevant to understanding and fixing the
@@ -121,7 +121,17 @@ class ClaudeCodeExplorer(Explorer):
             data = json.loads(raw)
             output = data.get("result", "")
         except json.JSONDecodeError:
+            data = None
             output = raw
+
+        if isinstance(data, dict):
+            # modelUsage holds cumulative per-model totals (camelCase);
+            # fall back to the top-level `usage` block on older CLIs.
+            model_usage = data.get("modelUsage")
+            if isinstance(model_usage, dict) and model_usage:
+                report_usage(extract_usage(model_usage))
+            else:
+                report_usage(extract_usage(data.get("usage")))
 
         if not output:
             return []

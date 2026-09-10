@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import ClassVar, List
 
 from .base import Explorer, ExplorerResult
-from .parsing import parse_relevant_files
+from .parsing import extract_usage_from_jsonl, parse_relevant_files, report_usage
 
 EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
 source files and line ranges most relevant to understanding and fixing the
@@ -163,6 +163,8 @@ class BaseCliAgentExplorer(Explorer):
             )
 
         output = _extract_output_text(completed.stdout or "")
+        # Best-effort: collect token usage from JSON event fields.
+        report_usage(extract_usage_from_jsonl(completed.stdout or ""))
         if not output:
             return []
         return parse_relevant_files(output, instance_id, top_k=top_k)
