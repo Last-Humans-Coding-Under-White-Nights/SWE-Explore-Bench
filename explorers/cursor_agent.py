@@ -90,7 +90,7 @@ class CursorAgentExplorer(Explorer):
 
         try:
             data = json.loads(raw)
-            output = data.get("result", "")
+            output = data.get("result", "") if isinstance(data, dict) else ""
         except json.JSONDecodeError:
             data = None
             output = raw

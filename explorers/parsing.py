@@ -626,9 +626,6 @@ def _scan_usage(obj: Any, usage: TokenUsage, state: dict, depth: int) -> None:
     elif isinstance(obj, list):
         for item in obj:
             _scan_usage(item, usage, state, depth + 1)
-    elif isinstance(obj, list):
-        for item in obj:
-            _scan_usage(item, usage, state, depth + 1)
 
 
 def extract_usage(obj: Any) -> TokenUsage:
