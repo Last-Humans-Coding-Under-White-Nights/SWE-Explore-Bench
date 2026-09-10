@@ -239,8 +239,6 @@ def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
         table.add_column(label, justify="right")
     values = totals.to_dict()
     table.add_row(str(cases), *[f"{values[key]:,}" for _, key in display])
-    if cases:
-        table.add_row("avg/case", *[f"{values[key] / cases:,.0f}" for _, key in display])
     console.print(table)
 
 
@@ -858,17 +856,30 @@ def run(
             continue
 
         t0 = time.time()
+        primary_k = top_k_list[0]
+        console.print(
+            f"  [dim]case log tuple = (prec, recall, f1, in, out, think, total); "
+            f"second tuple = cumulative sum over evaluated cases @ top_k={primary_k}[/dim]"
+        )
 
-        def _eval_one(rec: dict) -> tuple[str, list[tuple[str, int, int]] | None, TokenUsage | None]:
-            """Run explorer on one instance, return (instance_id, all_regions_at_max_k, token_usage)."""
+        def _eval_one(
+            rec: dict,
+        ) -> tuple[str, list[tuple[str, int, int]] | None, TokenUsage | None, float]:
+            """Run one instance: (instance_id, regions_at_max_k, token_usage, case_seconds)."""
             iid = rec.get("instance_id", "")
+            case_t0 = time.perf_counter()
             try:
                 with usage_collector() as tracker:
                     preds = method(rec)
             except Exception as e:
                 sys.stderr.write(f"\n  [ERROR] {name} {iid}: {e}\n")
-                return iid, None, None
-            return iid, preds, (tracker if tracker.has_any() else None)
+                return iid, None, None, time.perf_counter() - case_t0
+            return (
+                iid,
+                preds,
+                (tracker if tracker.has_any() else None),
+                time.perf_counter() - case_t0,
+            )
 
         def _score_instance(iid: str, preds: list[tuple[str, int, int]]) -> dict[int, dict[str, float]]:
             """Evaluate one instance at all top_k values. Returns {k: {metric: score}}."""
@@ -897,7 +908,7 @@ def run(
             iid: str,
             preds: list[tuple[str, int, int]],
             usage: TokenUsage | None,
-        ) -> None:
+        ) -> tuple[float, float, float]:
             nonlocal usage_cases
             scores_per_k = _score_instance(iid, preds)
             row_usage = usage.to_dict() if usage is not None else None
@@ -928,6 +939,55 @@ def run(
             if usage is not None:
                 usage_totals.add(usage)
                 usage_cases += 1
+            primary_scores = scores_per_k[primary_k]
+            return (
+                primary_scores["precision"],
+                primary_scores["recall"],
+                primary_scores["f1_score"],
+            )
+
+        def _log_case(
+            iid: str,
+            done: int,
+            case_scores: tuple[float, float, float],
+            usage: TokenUsage | None,
+            case_dt: float,
+            elapsed: float,
+            eta: float,
+        ) -> None:
+            """Per-case progress log: case tuple, cumulative sums, timings."""
+            case_u = usage if usage is not None else TokenUsage()
+            case_vals = (
+                *case_scores,
+                case_u.input_tokens,
+                case_u.output_tokens,
+                case_u.reasoning_tokens,
+                case_u.total,
+            )
+            sum_vals = (
+                per_k_totals[primary_k]["precision"],
+                per_k_totals[primary_k]["recall"],
+                per_k_totals[primary_k]["f1_score"],
+                usage_totals.input_tokens,
+                usage_totals.output_tokens,
+                usage_totals.reasoning_tokens,
+                usage_totals.total,
+            )
+            labels = ("prec", "recall", "f1", "in", "out", "think", "total")
+
+            def fmt(vals: tuple) -> str:
+                parts = [
+                    f"{labels[i]}: {v:.3f}" if i < 3 else f"{labels[i]}: {v:,.0f}"
+                    for i, v in enumerate(vals)
+                ]
+                return "(" + ", ".join(parts) + ")"
+
+            sys.stderr.write(
+                f"\n  [{name}] case {done}/{total_remaining} {iid}  "
+                f"case={fmt(case_vals)}  sum={fmt(sum_vals)}  "
+                f"time={case_dt:.0f}s elapsed={elapsed:.0f}s ETA={eta:.0f}s\n"
+            )
+            sys.stderr.flush()
 
         done = 0
         interrupted = False
@@ -936,7 +996,7 @@ def run(
                 with _interruptible_pool(workers) as pool:
                     futures = {pool.submit(_eval_one, rec): rec for rec in remaining_records}
                     for fut in as_completed(futures):
-                        iid, preds, usage = fut.result()
+                        iid, preds, usage, case_dt = fut.result()
                         done += 1
                         elapsed = time.time() - t0
                         rate = done / elapsed if elapsed > 0 else 0
@@ -949,10 +1009,11 @@ def run(
                         if preds is None:
                             skipped += 1
                             continue
-                        _record_result(iid, preds, usage)
+                        case_scores = _record_result(iid, preds, usage)
+                        _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)
             else:
                 for rec in remaining_records:
-                    iid, preds, usage = _eval_one(rec)
+                    iid, preds, usage, case_dt = _eval_one(rec)
                     done += 1
                     elapsed = time.time() - t0
                     rate = done / elapsed if elapsed > 0 else 0
@@ -965,7 +1026,8 @@ def run(
                     if preds is None:
                         skipped += 1
                         continue
-                    _record_result(iid, preds, usage)
+                    case_scores = _record_result(iid, preds, usage)
+                    _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)
         except KeyboardInterrupt:
             interrupted = True
 
