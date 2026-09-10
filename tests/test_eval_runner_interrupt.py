@@ -11,7 +11,7 @@ from eval_runner import _interruptible_pool
 def test_queued_work_is_cancelled_not_drained():
     with pytest.raises(KeyboardInterrupt):
         with _interruptible_pool(1) as pool:
-            futures = [pool.submit(time.sleep, 0.05) for _ in range(10)]
+            futures = [pool.submit(time.sleep, 0.5) for _ in range(10)]
             raise KeyboardInterrupt
 
     assert sum(f.cancelled() for f in futures) >= 9
