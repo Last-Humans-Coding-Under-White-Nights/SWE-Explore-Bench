@@ -14,24 +14,26 @@ from typing import ClassVar, List
 from .base import Explorer, ExplorerResult
 from .parsing import extract_usage_from_jsonl, parse_relevant_files, report_usage
 
-EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
-source files and line ranges most relevant to understanding and fixing the
-following issue. Do NOT make any code changes.
+EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
-Use available read-only repository navigation tools. Focus on finding the ROOT
-CAUSE, not just symptom locations.
+Use available read-only repository navigation tools. Focus on finding the ROOT CAUSE, not just symptom locations.
 
 VERY IMPORTANT: After exploration, output your findings in EXACTLY this format:
-
+```
 RELEVANT_FILES:
-- path/to/file1.py:10-50
-- path/to/file2.py:1-100
+- path/to/file1.py:10-20
+- path/to/file2.py:1-10
+- path/to/file3.py:2-2
+- path/to/file3.py:5-5
+```
 
 Focus on the root cause. Limit to top {top_k} most relevant regions.
 {prompt_additions}
 
-ISSUE:
+ISSUE DESCRIPTION FROM USER (very important):
 {issue}
+
+Do exactly this, but without modifications. You are planner, so you just provide ranges. Use SMALLER ranges whenever possible.
 """
 
 

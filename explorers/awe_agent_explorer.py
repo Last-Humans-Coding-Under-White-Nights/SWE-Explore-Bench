@@ -25,21 +25,22 @@ from .parsing import parse_relevant_files
 
 _AWE_AGENT_ROOT = _default_awe_agent_path()
 
-EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find
-the source files and line ranges most relevant to understanding and fixing the
-following issue. Do NOT make any code changes.
+EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
-Use bash commands (find, grep, cat, head) and the editor view command to explore.
-Focus on finding the ROOT CAUSE, not just symptom locations.
+Use bash commands (find, grep, cat, head) and the editor view command to explore. Focus on finding the ROOT CAUSE, not just symptom locations.
 
 When done, call the `finish` tool with a `lines` argument listing your top {top_k}
 most relevant regions in the format `path/to/file.py:start-end` (one per line).
 Example:
-  src/foo/bar.py:10-50
-  src/foo/baz.py:100-130
+  src/foo/bar.py:10-20
+  src/foo/baz.py:1-10
+  src/foo/bax.py:2-2
+  src/foo/bax.py:5-5
 
 ISSUE:
 {issue}
+
+Do exactly this, but without modifications. You are planner, so you just provide ranges. Use SMALLER ranges whenever possible.
 """
 
 

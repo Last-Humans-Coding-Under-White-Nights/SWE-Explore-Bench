@@ -19,20 +19,23 @@ from typing import List
 from .base import ContextRegion, Explorer, ExplorerResult
 from .parsing import extract_usage, parse_relevant_files, report_usage
 
-EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
-source files and line ranges most relevant to understanding and fixing the
-following issue. Do NOT make any code changes.
+EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
-After exploration, output your findings in EXACTLY this format:
-
+VERY IMPORTANT: After exploration, output your findings in EXACTLY this format:
+```
 RELEVANT_FILES:
-- path/to/file1.py:10-50
-- path/to/file2.py:1-100
+- path/to/file1.py:10-20
+- path/to/file2.py:1-10
+- path/to/file3.py:2-2
+- path/to/file3.py:5-5
+```
 
 Focus on the root cause. Limit to top {top_k} most relevant regions.
 
-ISSUE:
+ISSUE DESCRIPTION FROM USER (very important):
 {issue}
+
+Do exactly this, but without modifications. You are planner, so you just provide ranges. Use SMALLER ranges whenever possible.
 """
 
 
