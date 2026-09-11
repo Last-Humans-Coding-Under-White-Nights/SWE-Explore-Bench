@@ -29,7 +29,7 @@ def test_extract_anthropic_style_usage():
     assert u.output_tokens == 55
     assert u.reasoning_tokens == 0
     assert u.total == 155
-    assert not u.reasoning_separate
+    assert u.separate_reasoning_tokens == 0
 
 
 def test_extract_model_usage_camel_case():
@@ -68,9 +68,25 @@ def test_extract_openai_style_subtracts_cached_from_prompt():
     assert u.cache_read_tokens == 60
     assert u.output_tokens == 20
     assert u.reasoning_tokens == 8
-    assert not u.reasoning_separate
-    assert u.total == 40 + 20
+    assert u.separate_reasoning_tokens == 0
+    assert u.total == 60
     assert u.to_dict()["total"] == 60
+
+
+def test_extract_responses_api_style_subtracts_cached_from_input():
+    """Responses API input_tokens already includes the cached portion."""
+    data = {
+        "usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {"cached_tokens": 60},
+            "output_tokens": 20,
+        }
+    }
+    u = extract_usage(data)
+    assert u.input_tokens == 40
+    assert u.cache_read_tokens == 60
+    assert u.output_tokens == 20
+    assert u.total == 60
 
 
 def test_extract_gemini_style_reasoning_is_separate():
@@ -87,7 +103,7 @@ def test_extract_gemini_style_reasoning_is_separate():
     assert u.cache_read_tokens == 60
     assert u.output_tokens == 20
     assert u.reasoning_tokens == 8
-    assert u.reasoning_separate
+    assert u.separate_reasoning_tokens == 8
     assert u.total == 40 + 20 + 8
 
 
@@ -95,8 +111,31 @@ def test_extract_reasoning_without_output_is_separate():
     data = {"usage": {"input_tokens": 10, "reasoning_tokens": 5}}
     u = extract_usage(data)
     assert u.reasoning_tokens == 5
-    assert u.reasoning_separate
+    assert u.separate_reasoning_tokens == 5
     assert u.total == 15
+
+
+def test_text_reasoning_field_keeps_details_inclusive():
+    data = {
+        "usage": {
+            "prompt_tokens": 50,
+            "completion_tokens": 30,
+            "reasoning": "free-form text transcript",
+            "completion_tokens_details": {"reasoning_tokens": 25},
+        }
+    }
+    u = extract_usage(data)
+    assert u.output_tokens == 30
+    assert u.reasoning_tokens == 25
+    assert u.separate_reasoning_tokens == 0
+    assert u.total == 80
+
+
+def test_bare_candidates_count_is_not_output():
+    data = {"response": {"candidates": 3}, "usage": {"output_tokens": 7}}
+    u = extract_usage(data)
+    assert u.output_tokens == 7
+    assert u.separate_reasoning_tokens == 0
 
 
 def test_extract_ignores_text_and_bools():
@@ -123,7 +162,7 @@ def test_extract_usage_from_jsonl_events():
     assert u.cache_read_tokens == 5
     # opencode-style tokens objects carry output and reasoning as sibling
     # buckets, so reasoning is not a subset of output.
-    assert u.reasoning_separate
+    assert u.separate_reasoning_tokens == 2
     assert u.total == 20
 
 
@@ -151,7 +190,7 @@ def test_extract_opencode_style_sibling_reasoning():
     assert u.output_tokens == 4
     assert u.reasoning_tokens == 99
     assert u.cache_read_tokens == 7232
-    assert u.reasoning_separate
+    assert u.separate_reasoning_tokens == 99
     # Cache is tracked separately and never part of total.
     assert u.total == 11 + 4 + 99
 
@@ -167,8 +206,21 @@ def test_extract_openai_nested_reasoning_stays_inclusive():
     }
     u = extract_usage(data)
     assert u.reasoning_tokens == 25
-    assert not u.reasoning_separate
+    assert u.separate_reasoning_tokens == 0
     assert u.total == 80
+
+
+def test_from_dict_legacy_reasoning_flag():
+    legacy = {
+        "input": 5,
+        "output": 4,
+        "reasoning": 2,
+        "reasoning_separate": True,
+        "total": 11,
+    }
+    u = TokenUsage.from_dict(legacy)
+    assert u.separate_reasoning_tokens == 2
+    assert u.total == 11
 
 
 def test_extract_usage_from_jsonl_empty():
@@ -198,16 +250,21 @@ def test_token_usage_roundtrip_and_add():
 def test_add_mixed_reasoning_provenance():
     included = TokenUsage(input_tokens=10, output_tokens=20, reasoning_tokens=5)
     separate = TokenUsage(
-        input_tokens=1, output_tokens=2, reasoning_tokens=3, reasoning_separate=True
+        input_tokens=1,
+        output_tokens=2,
+        reasoning_tokens=3,
+        separate_reasoning_tokens=3,
     )
+    assert included.total == 30
     assert separate.total == 6
 
     total = TokenUsage()
     total.add(included)
-    assert total.total == 30
     total.add(separate)
-    assert total.reasoning_separate
-    assert total.total == 11 + 22 + 8
+    # Aggregation must be additive: no reasoning token counted twice.
+    assert total.total == included.total + separate.total == 36
+    assert total.reasoning_tokens == 8
+    assert total.separate_reasoning_tokens == 3
 
 
 def test_report_usage_collector_accumulates_per_thread():

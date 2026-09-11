@@ -119,7 +119,7 @@ class ClaudeCodeExplorer(Explorer):
 
         try:
             data = json.loads(raw)
-            output = data.get("result", "") if isinstance(data, dict) else ""
+            output = data.get("result", "") if isinstance(data, dict) else raw
         except json.JSONDecodeError:
             data = None
             output = raw

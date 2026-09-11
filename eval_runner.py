@@ -389,7 +389,8 @@ def run(
     log_level: str = typer.Option(
         "info", "--log",
         help="Console log level: info, debug, or trace. Debug logs CLI-agent "
-        "launch/return; trace additionally dumps the agent output before parsing.",
+        "launch/return; trace additionally dumps the agent output before "
+        "parsing. Applies to shared-base CLI agents (opencode, deveco).",
     ),
     limit: int | None = typer.Option(None, "--limit", "-n"),
     skip_missing_repo: bool = typer.Option(True, "--skip-missing-repo/--no-skip-missing-repo"),
@@ -815,12 +816,13 @@ def run(
         per_k_results: dict[int, list[dict]] = {k: [] for k in top_k_list}
         usage_totals = TokenUsage()
         usage_cases = 0
-        resumed_usage_ids: set[str] = set()
         skipped = 0
         resumed_ids: set[str] = set()
 
         if resume and output_jsonl:
-            # Find instance_ids completed in ALL top_k files
+            # Find instance_ids completed in ALL top_k files. Instances
+            # present in only a subset get re-run, so their usage must not
+            # be accumulated here or it would be counted twice.
             per_k_ids: list[set[str]] = []
             for k in top_k_list:
                 out_path = _format_output_path(output_jsonl, name, k)
@@ -833,18 +835,24 @@ def run(
                     per_k_evaluated[k] += 1
                     for m in METRICS:
                         per_k_totals[k][m] += r["metrics"].get(m, 0.0)
-                    # Token usage is per-case: count each instance only once
-                    # even when it appears in several top_k files.
-                    iid = r.get("instance_id", "")
-                    tu = TokenUsage.from_dict(r.get("token_usage"))
-                    if tu is not None and iid not in resumed_usage_ids:
-                        resumed_usage_ids.add(iid)
-                        usage_totals.add(tu)
-                        usage_cases += 1
             if per_k_ids:
                 resumed_ids = per_k_ids[0]
                 for s in per_k_ids[1:]:
                     resumed_ids &= s
+                # Token usage is per-case: count each resumed instance once.
+                for iid in resumed_ids:
+                    row = next(
+                        (
+                            r
+                            for r in per_k_results[top_k_list[0]]
+                            if r.get("instance_id") == iid
+                        ),
+                        None,
+                    )
+                    tu = TokenUsage.from_dict(row.get("token_usage")) if row else None
+                    if tu is not None:
+                        usage_totals.add(tu)
+                        usage_cases += 1
 
         remaining_records = [r for r in records if r.get("instance_id", "") not in resumed_ids]
         total_remaining = len(remaining_records)
@@ -887,7 +895,12 @@ def run(
                     preds = method(rec)
             except Exception as e:
                 sys.stderr.write(f"\n  [ERROR] {name} {iid}: {e}\n")
-                return iid, None, None, time.perf_counter() - case_t0
+                return (
+                    iid,
+                    None,
+                    (tracker if tracker.has_any() else None),
+                    time.perf_counter() - case_t0,
+                )
             return (
                 iid,
                 preds,
@@ -1024,6 +1037,11 @@ def run(
                         sys.stderr.flush()
                         if preds is None:
                             skipped += 1
+                            # Tokens already spent on a failed case still
+                            # count towards the run's usage.
+                            if usage is not None:
+                                usage_totals.add(usage)
+                                usage_cases += 1
                             continue
                         case_scores = _record_result(iid, preds, usage)
                         _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)
@@ -1041,6 +1059,9 @@ def run(
                     sys.stderr.flush()
                     if preds is None:
                         skipped += 1
+                        if usage is not None:
+                            usage_totals.add(usage)
+                            usage_cases += 1
                         continue
                     case_scores = _record_result(iid, preds, usage)
                     _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)

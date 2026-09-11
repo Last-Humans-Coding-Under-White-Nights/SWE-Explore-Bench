@@ -192,6 +192,12 @@ class BaseCliAgentExplorer(Explorer):
                 f"(stdout={len(stdout_text)}B stderr={len(stderr_text)}B){tail}"
             )
 
+        output = _extract_output_text(stdout_text)
+        # Best-effort: collect token usage from JSON event fields. Done
+        # before the rc check below can raise, so failed-but-expensive runs
+        # still hand their spend to the collector (see _eval_one).
+        report_usage(extract_usage_from_jsonl(stdout_text))
+
         if completed.returncode != 0:
             stdout_preview = (completed.stdout or "")[-2000:]
             stderr_preview = (completed.stderr or "")[-2000:]
@@ -202,9 +208,6 @@ class BaseCliAgentExplorer(Explorer):
                 f"{self.cli_display_name} failed (rc={completed.returncode}):\n{detail}"
             )
 
-        output = _extract_output_text(completed.stdout or "")
-        # Best-effort: collect token usage from JSON event fields.
-        report_usage(extract_usage_from_jsonl(completed.stdout or ""))
         if not output:
             return []
         _log(
