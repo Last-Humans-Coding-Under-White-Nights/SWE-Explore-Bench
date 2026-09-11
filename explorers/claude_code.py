@@ -25,25 +25,27 @@ from pathlib import Path
 from typing import List
 
 from .base import Explorer, ExplorerResult
-from .parsing import parse_relevant_files
+from .parsing import extract_usage, parse_relevant_files, report_usage
 
-EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
-source files and line ranges most relevant to understanding and fixing the
-following issue. Do NOT make any code changes.
+EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
-Use Glob, Grep, and Read tools to explore the codebase. Focus on finding
-the ROOT CAUSE, not just symptom locations.
+Use Glob, Grep, and Read tools to explore the codebase. Focus on finding the ROOT CAUSE, not just symptom locations.
 
-After exploration, output your findings in EXACTLY this format:
-
+VERY IMPORTANT: After exploration, output your findings in EXACTLY this format:
+```
 RELEVANT_FILES:
-- path/to/file1.py:10-50
-- path/to/file2.py:1-100
+- path/to/file1.py:10-20
+- path/to/file2.py:1-10
+- path/to/file3.py:2-2
+- path/to/file3.py:5-5
+```
 
 Focus on the root cause. Limit to top {top_k} most relevant regions.
 
-ISSUE:
+ISSUE DESCRIPTION FROM USER (very important):
 {issue}
+
+Do exactly this, but without modifications. You are planner, so you just provide ranges. Use SMALLER ranges whenever possible.
 """
 
 
@@ -119,9 +121,19 @@ class ClaudeCodeExplorer(Explorer):
 
         try:
             data = json.loads(raw)
-            output = data.get("result", "")
+            output = data.get("result", "") if isinstance(data, dict) else raw
         except json.JSONDecodeError:
+            data = None
             output = raw
+
+        if isinstance(data, dict):
+            # modelUsage holds cumulative per-model totals (camelCase);
+            # fall back to the top-level `usage` block on older CLIs.
+            model_usage = data.get("modelUsage")
+            if isinstance(model_usage, dict) and model_usage:
+                report_usage(extract_usage(model_usage))
+            else:
+                report_usage(extract_usage(data.get("usage")))
 
         if not output:
             return []

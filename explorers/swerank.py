@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 
 from .base import ContextRegion, ExplorerResult
 from .chunking import Chunk, chunk_repo
+from .parsing import _usage_to_dict, extract_usage, report_usage
 
 
 def _post_chat_completion(
@@ -40,7 +41,17 @@ def _post_chat_completion(
         temperature=temperature,
         timeout=timeout,
     )
+    _report_openai_usage(resp)
     return resp.choices[0].message.content
+
+
+def _report_openai_usage(resp: Any) -> None:
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return
+    data = _usage_to_dict(usage)
+    if data is not None:
+        report_usage(extract_usage(data))
 
 
 def _extract_json_obj(text: str) -> dict[str, Any]:

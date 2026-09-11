@@ -4,38 +4,59 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import ClassVar, List
 
 from .base import Explorer, ExplorerResult
-from .parsing import parse_relevant_files
+from .parsing import extract_usage_from_jsonl, parse_relevant_files, report_usage
 
-EXPLORE_PROMPT = """You are a code exploration specialist. Explore this repository to find the
-source files and line ranges most relevant to understanding and fixing the
-following issue. Do NOT make any code changes.
+EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
-Use available read-only repository navigation tools. Focus on finding the ROOT
-CAUSE, not just symptom locations.
+Use available read-only repository navigation tools. Focus on finding the ROOT CAUSE, not just symptom locations.
 
 VERY IMPORTANT: After exploration, output your findings in EXACTLY this format:
-
+```
 RELEVANT_FILES:
-- path/to/file1.py:10-50
-- path/to/file2.py:1-100
+- path/to/file1.py:10-20
+- path/to/file2.py:1-10
+- path/to/file3.py:2-2
+- path/to/file3.py:5-5
+```
 
 Focus on the root cause. Limit to top {top_k} most relevant regions.
 {prompt_additions}
 
-ISSUE:
+ISSUE DESCRIPTION FROM USER (very important):
 {issue}
+
+Do exactly this, but without modifications. You are planner, so you just provide ranges. Use SMALLER ranges whenever possible.
 """
 
 
 ANSWER_MARKER = "RELEVANT_FILES:"
 
 XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+
+LOG_LEVELS = {"info": 0, "debug": 1, "trace": 2}
+_log_level = 0
+
+
+def set_log_level(level: str) -> None:
+    """Set console log verbosity for CLI-agent explorers (info|debug|trace)."""
+    global _log_level
+    _log_level = LOG_LEVELS.get(level.lower(), LOG_LEVELS["info"])
+
+
+def _log(message: str, level: str = "debug") -> None:
+    if LOG_LEVELS.get(level, 0) > _log_level:
+        return
+    timestamp = time.strftime("%H:%M:%S")
+    sys.stderr.write(f"\n  [{level} {timestamp}] {message}\n")
+    sys.stderr.flush()
 
 
 def _extract_output_text(raw: str) -> str:
@@ -126,6 +147,13 @@ class BaseCliAgentExplorer(Explorer):
         cmd = self.build_cmd()
         env = dict(os.environ)
 
+        proc_t0 = time.perf_counter()
+        _log(
+            f"{self.cli_display_name} {instance_id}: launching "
+            f"`{' '.join(cmd)}` (cwd={self.repo_root}, "
+            f"prompt={len(prompt)} chars, timeout={self.timeout}s)"
+        )
+
         # A temp HOME keeps the run from picking up the user's own config.
         with tempfile.TemporaryDirectory(prefix="cli-agent-home-") as tmp_home:
             self._isolate_env(env, Path(tmp_home))
@@ -144,13 +172,33 @@ class BaseCliAgentExplorer(Explorer):
                     env=env,
                 )
             except FileNotFoundError:
+                _log(f"{self.cli_display_name} {instance_id}: binary not found")
                 raise RuntimeError(
                     f"{self.cli_display_name} not found. {self.install_hint}".strip()
                 )
             except subprocess.TimeoutExpired:
+                _log(
+                    f"{self.cli_display_name} {instance_id}: timed out "
+                    f"after {self.timeout}s"
+                )
                 raise RuntimeError(
                     f"{self.cli_display_name} timed out after {self.timeout}s"
                 )
+
+            stderr_text = completed.stderr or ""
+            stdout_text = completed.stdout or ""
+            tail = f" stderr_tail={stderr_text[-300:]!r}" if stderr_text else ""
+            _log(
+                f"{self.cli_display_name} {instance_id}: rc={completed.returncode} "
+                f"in {time.perf_counter() - proc_t0:.1f}s "
+                f"(stdout={len(stdout_text)}B stderr={len(stderr_text)}B){tail}"
+            )
+
+        output = _extract_output_text(stdout_text)
+        # Best-effort: collect token usage from JSON event fields. Done
+        # before the rc check below can raise, so failed-but-expensive runs
+        # still hand their spend to the collector (see _eval_one).
+        report_usage(extract_usage_from_jsonl(stdout_text))
 
         if completed.returncode != 0:
             stdout_preview = (completed.stdout or "")[-2000:]
@@ -162,7 +210,10 @@ class BaseCliAgentExplorer(Explorer):
                 f"{self.cli_display_name} failed (rc={completed.returncode}):\n{detail}"
             )
 
-        output = _extract_output_text(completed.stdout or "")
         if not output:
             return []
+        _log(
+            f"{self.cli_display_name} {instance_id}: agent output:\n{output}",
+            level="trace",
+        )
         return parse_relevant_files(output, instance_id, top_k=top_k)

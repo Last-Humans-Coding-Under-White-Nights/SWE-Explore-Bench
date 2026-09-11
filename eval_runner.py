@@ -23,7 +23,13 @@ from rich.console import Console
 from rich.table import Table
 
 from eval import ExploreEvaluator
+from explorers._cli_agent_base import set_log_level
 from explorers.base import ExplorerResult
+from explorers.parsing import (
+    TokenUsage,
+    register_litellm_usage_callback,
+    usage_collector,
+)
 
 app = typer.Typer(rich_markup_mode="rich")
 console = Console()
@@ -215,6 +221,28 @@ def _load_existing_results(path: Path) -> list[dict]:
     return rows
 
 
+def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
+    """Print the per-explorer total token usage table (in/out/cache/reasoning)."""
+    if not totals.has_any():
+        console.print(f"  [dim]Token usage: no data reported by {name}[/dim]")
+        return
+    table = Table(title=f"{name} Token Usage", show_lines=False)
+    table.add_column("Cases", justify="right")
+    display = (
+        ("Input", "input"),
+        ("Output", "output"),
+        ("Cache Read", "cache_read"),
+        ("Cache Write", "cache_write"),
+        ("Reasoning", "reasoning"),
+        ("Total", "total"),
+    )
+    for label, _ in display:
+        table.add_column(label, justify="right")
+    values = totals.to_dict()
+    table.add_row(str(cases), *[f"{values[key]:,}" for _, key in display])
+    console.print(table)
+
+
 # ── main command ────────────────────────────────────────────────────────
 
 @app.command()
@@ -358,6 +386,12 @@ def run(
         1, "--workers", "-w",
         help="Parallel workers (for all explorers)",
     ),
+    log_level: str = typer.Option(
+        "info", "--log",
+        help="Console log level: info, debug, or trace. Debug logs CLI-agent "
+        "launch/return; trace additionally dumps the agent output before "
+        "parsing. Applies to shared-base CLI agents (opencode, deveco).",
+    ),
     limit: int | None = typer.Option(None, "--limit", "-n"),
     skip_missing_repo: bool = typer.Option(True, "--skip-missing-repo/--no-skip-missing-repo"),
     no_line_counts: bool = typer.Option(False, "--no-line-counts"),
@@ -395,6 +429,16 @@ def run(
     os.environ.setdefault("MSWEA_AZURE_ENDPOINT", os.environ.get("LLM_API_BASE", ""))
     os.environ.setdefault("MSWEA_MODEL_NAME", os.environ.get("LLM_DEPLOYMENT", "gpt-5.4"))
     os.environ.setdefault("MSWEA_API_VERSION", "2024-12-01-preview")
+
+    if log_level.lower() not in {"info", "debug", "trace"}:
+        console.print(
+            f"[red]Invalid --log level: {log_level} (info|debug|trace)[/red]"
+        )
+        raise typer.Exit(1)
+    set_log_level(log_level)
+
+    # Capture token usage from in-process LLM calls (litellm-based agents).
+    register_litellm_usage_callback()
 
     records = _load_bench_records(bench_path)
     if skip_empty_core:
@@ -770,11 +814,15 @@ def run(
         per_k_totals: dict[int, dict[str, float]] = {k: {m: 0.0 for m in METRICS} for k in top_k_list}
         per_k_evaluated: dict[int, int] = {k: 0 for k in top_k_list}
         per_k_results: dict[int, list[dict]] = {k: [] for k in top_k_list}
+        usage_totals = TokenUsage()
+        usage_cases = 0
         skipped = 0
         resumed_ids: set[str] = set()
 
         if resume and output_jsonl:
-            # Find instance_ids completed in ALL top_k files
+            # Find instance_ids completed in ALL top_k files. Instances
+            # present in only a subset get re-run, so their usage must not
+            # be accumulated here or it would be counted twice.
             per_k_ids: list[set[str]] = []
             for k in top_k_list:
                 out_path = _format_output_path(output_jsonl, name, k)
@@ -791,6 +839,20 @@ def run(
                 resumed_ids = per_k_ids[0]
                 for s in per_k_ids[1:]:
                     resumed_ids &= s
+                # Token usage is per-case: count each resumed instance once.
+                for iid in resumed_ids:
+                    row = next(
+                        (
+                            r
+                            for r in per_k_results[top_k_list[0]]
+                            if r.get("instance_id") == iid
+                        ),
+                        None,
+                    )
+                    tu = TokenUsage.from_dict(row.get("token_usage")) if row else None
+                    if tu is not None:
+                        usage_totals.add(tu)
+                        usage_cases += 1
 
         remaining_records = [r for r in records if r.get("instance_id", "") not in resumed_ids]
         total_remaining = len(remaining_records)
@@ -811,19 +873,40 @@ def run(
                 avg = {m: (per_k_totals[k][m] / ev if ev else 0.0) for m in METRICS}
                 table.add_row(str(k), str(ev), *[f"{avg[m]:.4f}" for m in METRICS])
             console.print(table)
+            _print_usage_table(name, usage_totals, usage_cases)
             continue
 
         t0 = time.time()
+        primary_k = top_k_list[0]
+        console.print(
+            f"  [dim]case log tuple = (prec, recall, f1, in, out, think, total); "
+            f"aggr = metrics averaged, tokens summed over evaluated cases "
+            f"@ top_k={primary_k}[/dim]"
+        )
 
-        def _eval_one(rec: dict) -> tuple[str, list[tuple[str, int, int]] | None]:
-            """Run explorer on one instance, return (instance_id, all_regions_at_max_k)."""
+        def _eval_one(
+            rec: dict,
+        ) -> tuple[str, list[tuple[str, int, int]] | None, TokenUsage | None, float]:
+            """Run one instance: (instance_id, regions_at_max_k, token_usage, case_seconds)."""
             iid = rec.get("instance_id", "")
+            case_t0 = time.perf_counter()
             try:
-                preds = method(rec)
+                with usage_collector() as tracker:
+                    preds = method(rec)
             except Exception as e:
                 sys.stderr.write(f"\n  [ERROR] {name} {iid}: {e}\n")
-                preds = None
-            return iid, preds
+                return (
+                    iid,
+                    None,
+                    (tracker if tracker.has_any() else None),
+                    time.perf_counter() - case_t0,
+                )
+            return (
+                iid,
+                preds,
+                (tracker if tracker.has_any() else None),
+                time.perf_counter() - case_t0,
+            )
 
         def _score_instance(iid: str, preds: list[tuple[str, int, int]]) -> dict[int, dict[str, float]]:
             """Evaluate one instance at all top_k values. Returns {k: {metric: score}}."""
@@ -848,8 +931,14 @@ def run(
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 out_files[k] = out_path.open("a")
 
-        def _record_result(iid: str, preds: list[tuple[str, int, int]]) -> None:
+        def _record_result(
+            iid: str,
+            preds: list[tuple[str, int, int]],
+            usage: TokenUsage | None,
+        ) -> tuple[float, float, float]:
+            nonlocal usage_cases
             scores_per_k = _score_instance(iid, preds)
+            row_usage = usage.to_dict() if usage is not None else None
             for k in top_k_list:
                 sliced = preds[:k]
                 row = {
@@ -858,6 +947,7 @@ def run(
                     "regions": [{"path": p, "start": s, "end": e} for p, s, e in sliced],
                     "metrics": scores_per_k[k],
                     "num_regions": min(len(preds), k),
+                    "token_usage": row_usage,
                 }
                 if name == "codenib":
                     row["explorer_config"] = {
@@ -872,6 +962,61 @@ def run(
                 if k in out_files:
                     out_files[k].write(json.dumps(row, ensure_ascii=False) + "\n")
                     out_files[k].flush()
+            # Token usage is per-case, not per-top_k: accumulate once.
+            if usage is not None:
+                usage_totals.add(usage)
+                usage_cases += 1
+            primary_scores = scores_per_k[primary_k]
+            return (
+                primary_scores["precision"],
+                primary_scores["recall"],
+                primary_scores["f1_score"],
+            )
+
+        def _log_case(
+            iid: str,
+            done: int,
+            case_scores: tuple[float, float, float],
+            usage: TokenUsage | None,
+            case_dt: float,
+            elapsed: float,
+            eta: float,
+        ) -> None:
+            """Per-case progress log: case tuple, aggregates, timings."""
+            case_u = usage if usage is not None else TokenUsage()
+            case_vals = (
+                *case_scores,
+                case_u.input_tokens,
+                case_u.output_tokens,
+                case_u.reasoning_tokens,
+                case_u.total,
+            )
+            n = per_k_evaluated[primary_k]
+            aggr_vals = (
+                per_k_totals[primary_k]["precision"] / n,
+                per_k_totals[primary_k]["recall"] / n,
+                per_k_totals[primary_k]["f1_score"] / n,
+                usage_totals.input_tokens,
+                usage_totals.output_tokens,
+                usage_totals.reasoning_tokens,
+                usage_totals.total,
+            )
+            labels = ("prec", "recall", "f1", "in", "out", "think", "total")
+
+            def fmt(vals: tuple) -> str:
+                parts = [
+                    f"{labels[i]}: {v:.3f}" if i < 3 else f"{labels[i]}: {v:,.0f}"
+                    for i, v in enumerate(vals)
+                ]
+                return "(" + ", ".join(parts) + ")"
+
+            now = time.strftime("%H:%M:%S")
+            sys.stderr.write(
+                f"\n  [{name} {now}] case {done}/{total_remaining} {iid}  "
+                f"case={fmt(case_vals)}  aggr={fmt(aggr_vals)}  "
+                f"time={case_dt:.0f}s elapsed={elapsed:.0f}s ETA={eta:.0f}s\n"
+            )
+            sys.stderr.flush()
 
         done = 0
         interrupted = False
@@ -880,7 +1025,7 @@ def run(
                 with _interruptible_pool(workers) as pool:
                     futures = {pool.submit(_eval_one, rec): rec for rec in remaining_records}
                     for fut in as_completed(futures):
-                        iid, preds = fut.result()
+                        iid, preds, usage, case_dt = fut.result()
                         done += 1
                         elapsed = time.time() - t0
                         rate = done / elapsed if elapsed > 0 else 0
@@ -892,11 +1037,17 @@ def run(
                         sys.stderr.flush()
                         if preds is None:
                             skipped += 1
+                            # Tokens already spent on a failed case still
+                            # count towards the run's usage.
+                            if usage is not None:
+                                usage_totals.add(usage)
+                                usage_cases += 1
                             continue
-                        _record_result(iid, preds)
+                        case_scores = _record_result(iid, preds, usage)
+                        _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)
             else:
                 for rec in remaining_records:
-                    iid, preds = _eval_one(rec)
+                    iid, preds, usage, case_dt = _eval_one(rec)
                     done += 1
                     elapsed = time.time() - t0
                     rate = done / elapsed if elapsed > 0 else 0
@@ -908,8 +1059,12 @@ def run(
                     sys.stderr.flush()
                     if preds is None:
                         skipped += 1
+                        if usage is not None:
+                            usage_totals.add(usage)
+                            usage_cases += 1
                         continue
-                    _record_result(iid, preds)
+                    case_scores = _record_result(iid, preds, usage)
+                    _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)
         except KeyboardInterrupt:
             interrupted = True
 
@@ -951,6 +1106,7 @@ def run(
                 *[f"{avg[m]:.4f}" for m in METRICS],
             )
         console.print(table)
+        _print_usage_table(name, usage_totals, usage_cases)
 
         # ── save per top_k (already written incrementally; just log) ──
         if output_jsonl:
