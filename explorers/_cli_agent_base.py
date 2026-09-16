@@ -216,4 +216,6 @@ class BaseCliAgentExplorer(Explorer):
             f"{self.cli_display_name} {instance_id}: agent output:\n{output}",
             level="trace",
         )
-        return parse_relevant_files(output, instance_id, top_k=top_k)
+        return parse_relevant_files(
+            output, instance_id, top_k=top_k, repo_path=self.repo_root,
+        )

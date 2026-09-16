@@ -3,12 +3,16 @@ from __future__ import annotations
 
 import contextvars
 import json
+import logging
 import re
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterator, List
 
 from .base import ContextRegion, ExplorerResult
+
+logger = logging.getLogger(__name__)
 
 # File extensions we recognise in fallback regex
 _SRC_EXTS = r"py|js|jsx|ts|tsx|java|go|rs|c|cpp|h|rb|php|md|txt|toml|yaml|yml|json|rst|cfg|ini|sh|ets"
@@ -16,6 +20,13 @@ _SRC_EXTS = r"py|js|jsx|ts|tsx|java|go|rs|c|cpp|h|rb|php|md|txt|toml|yaml|yml|js
 # Known absolute prefixes that agents may return (e.g. /opt/swe-explore/data/repos/xxx/...)
 _ABS_REPO_PATTERN = re.compile(
     r"^/(?:opt|home|root|tmp|workspace|testbed)/.+?/repos/[^/]+/"
+)
+
+
+# Read a location from the start; columns and trailing explanations are optional.
+_ENTRY = re.compile(
+    r"^(?P<path>.+?):\s*[Ll]?(?P<start>-?\d+)"
+    r"(?:\s*(?P<sep>[-–—])\s*(?:[Ll]?(?P<end>-?\d+))?)?"
 )
 
 
@@ -62,63 +73,157 @@ def _normalize_path(path: str, repo_path: str = "") -> str:
     return path
 
 
+def _resolve_repo_path(path: str, repo_path: str | Path) -> str | None:
+    """Resolve a checkout file, checking legacy container aliases only if absent."""
+    if not str(repo_path).strip():
+        return None
+    root = Path(repo_path).resolve()
+    path = path.strip().replace("\\", "/")
+    candidate = Path(path)
+    # A foreign Windows drive must not become a relative POSIX filename.
+    if PureWindowsPath(path).drive and not candidate.is_absolute():
+        return None
+    candidates = [candidate if candidate.is_absolute() else root / candidate]
+    # Some tools prefix relative paths with the repository directory name.
+    if not candidate.is_absolute() and candidate.parts and candidate.parts[0] == root.name:
+        candidates.append(root.joinpath(*candidate.parts[1:]))
+    if candidate.is_absolute():
+        # Recover known container prefixes only when the mapped file exists.
+        relative = _normalize_path(path)
+        if relative != path and not Path(relative).is_absolute():
+            candidates.append(root / relative)
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except FileNotFoundError:
+            continue
+        except (OSError, RuntimeError, ValueError):
+            return None
+        try:
+            relative = resolved.relative_to(root)
+        except ValueError:
+            return None
+        # An existing outside path or directory must never be reinterpreted.
+        return relative.as_posix() if resolved.is_file() else None
+    return None
+
+
+def _parse_location(location: str) -> ContextRegion | None:
+    """Read one decorated location; raise ValueError for an invalid range."""
+    # Explanatory notes follow whitespace; do not remove punctuation
+    # embedded in paths (which could turn an outside path into a local one).
+    previous = None
+    while location != previous:
+        previous = location
+        location = location.strip().lstrip("`*\"'").rstrip("`*\"'.!?,; ")
+        location = re.sub(r"\s+(?:\(.*\)|#.*)$", "", location)
+    path = location
+    start, end = 1, -1
+    range_match = _ENTRY.match(location)
+    if range_match:
+        path = range_match["path"]
+        start = int(range_match["start"])
+        end = int(range_match["end"]) if range_match["end"] is not None else start
+        incomplete = range_match["sep"] is not None and range_match["end"] is None
+        if incomplete or start < 1 or end < start:
+            raise ValueError(f"Invalid line range in {location!r}")
+    elif ":" in location.removeprefix(PureWindowsPath(location).drive):
+        raise ValueError(f"Invalid line range in {location!r}")
+    path = path.strip().strip("`*\"'").strip()
+    if not path:
+        return None
+    return ContextRegion(path=path, start=start, end=end)
+
+
+def _split_relevant_block(text: str) -> tuple[list[str], str]:
+    """Separate structured entries from prose that can be searched independently."""
+    match = re.search(r"RELEVANT_FILES:\s*\n((?:[-*] .+\n?)+)", text)
+    if not match:
+        match = re.search(r"RELEVANT_FILES:\s*\n((?:[^\n]+\n?)+)", text)
+    if not match:
+        return [], text
+    entries = [
+        re.sub(r"^(?:[-*]|\d+[.)])\s+", "", line.strip())
+        for line in match.group(1).strip().split("\n")
+    ]
+    # Never retry rejected block entries as shorter prose locations.
+    return entries, text[:match.start()] + "\n" + text[match.end():]
+
+
+def _sweep_locations(text: str) -> Iterator[str]:
+    """Find complete location tokens in prose without treating apostrophes as quotes."""
+    # Tokenize before matching so punctuation in a path cannot cause
+    # an unresolvable absolute path to be accepted as a relative suffix.
+    # Keep whitespace-separated range components in one token, including
+    # a dangling hyphen, so malformed ranges cannot become single lines.
+    sweep = re.sub(r"[ \t]+:(?=[ \t]*[Ll]?-?\d)", ":", text)
+    sweep = re.sub(
+        r":[ \t]*[Ll]?-?\d+(?:[ \t]*[-–—][ \t]*(?:[Ll]?-?\d+)?)?",
+        lambda match: re.sub(r"[ \t]+", "", match[0]),
+        sweep,
+    )
+    # Only a quote at a token boundary opens a quoted path; "it's" does not.
+    tokens = (
+        r"""(?:`[^`\n]*`|"[^"\n]*"|(?<![\w/\\])'[^'\n]*'|"""
+        r"""[^\s`"<>()[\]{},;])+"""
+    )
+    for token in re.findall(tokens, sweep):
+        if re.search(rf"\.(?:{_SRC_EXTS})[`*\"']*:", token):
+            yield token
+
+
 def parse_relevant_files(
     text: str,
     instance_id: str,
     *,
     top_k: int | None = None,
+    repo_path: str | Path | None = None,
 ) -> List[ExplorerResult]:
-    """Parse a RELEVANT_FILES block with optional ``path:start-end`` ranges.
+    """Parse whole files, single lines, and ranges from an agent answer.
 
-    Falls back to a regex sweep for ``file:line-line`` patterns when the
-    structured block is absent.
+    With ``repo_path``, only existing files inside that root are accepted.
+    Invalid locations are logged and skipped before applying ``top_k``.
+    A missing or blank root retains legacy normalization for archived output.
     """
+    if repo_path is not None and not str(repo_path).strip():
+        repo_path = None
     results: list[ExplorerResult] = []
 
-    # 1) Try structured RELEVANT_FILES block
-    match = re.search(r"RELEVANT_FILES:\s*\n((?:[-*] .+\n?)+)", text)
-    if not match:
-        match = re.search(r"RELEVANT_FILES:\s*\n((?:[^\n]+\n?)+)", text)
-
-    if match:
-        block = match.group(1)
-        for line in block.strip().split("\n"):
-            line = line.strip().lstrip("-* ").strip()
-            if not line:
+    entries, outside = _split_relevant_block(text)
+    for locations in (entries, _sweep_locations(outside)):
+        for location in locations:
+            try:
+                region = _parse_location(location)
+            except ValueError as exc:
+                logger.warning("%s: %s; skipping", instance_id, exc)
                 continue
-            if ":" in line and "-" in line.split(":")[-1]:
-                path, range_str = line.rsplit(":", 1)
-                parts = range_str.split("-")
-                try:
-                    start, end = int(parts[0]), int(parts[1])
-                except ValueError:
+            if region is None:
+                continue
+
+            if repo_path is not None:
+                normalized = _resolve_repo_path(region.path, repo_path)
+                if normalized is None:
+                    logger.warning(
+                        "%s: Unresolvable path %r inside repository %s; skipping",
+                        instance_id, region.path, repo_path,
+                    )
                     continue
             else:
-                path = line.split(":")[0]
-                if not path or ("/" not in path and "." not in path):
+                # Preserve rootless whole-file filtering, but allow Makefile:1-5.
+                if region.end == -1 and not any(char in region.path for char in "/.\\"):
                     continue
-                start, end = 1, -1
+                normalized = _normalize_path(region.path.replace("\\", "/"))
+                while normalized.startswith("./"):
+                    normalized = normalized[2:]
 
-            path = _normalize_path(path)
+            region.path = normalized
             results.append(ExplorerResult(
                 instance_id=instance_id,
                 score=1.0,
-                regions=[ContextRegion(path=path, start=start, end=end)],
+                regions=[region],
             ))
         if results:
-            return results[:top_k] if top_k else results
-
-    # 2) Fallback: regex for file:line-line patterns
-    pattern = rf"[\w/.-]+\.(?:{_SRC_EXTS}):\d+-\d+"
-    for m in re.finditer(pattern, text):
-        parts = m.group().rsplit(":", 1)
-        path = _normalize_path(parts[0])
-        start_s, end_s = parts[1].split("-")
-        results.append(ExplorerResult(
-            instance_id=instance_id,
-            score=1.0,
-            regions=[ContextRegion(path=path, start=int(start_s), end=int(end_s))],
-        ))
+            break
 
     return results[:top_k] if top_k else results
 

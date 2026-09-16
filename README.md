@@ -303,6 +303,48 @@ results = evaluator.evaluate(
 )
 ```
 
+### Agent output parsing
+
+Claude Code, Cursor, OpenCode, DevEco Code, Mini-SWE-Agent, and AweAgent use
+[`parse_relevant_files`](explorers/parsing.py) to read locations such as:
+
+```text
+RELEVANT_FILES:
+- entry/src/main/ets/pages/Index.ets:10-20
+- entry/src/main/ets/model/DataSource.ets:5
+- entry/src/main/ets/common/types.d.ets
+```
+
+Line numbers are 1-based and ranges are inclusive. `:5` means lines 5–5;
+a path without line numbers means the whole file (`start=1`, `end=-1`).
+The parser accepts whitespace around range separators, numbered lists, quoted
+filenames, Markdown emphasis, `L10-L20` line labels, and Unicode range dashes.
+Trailing columns (`:10:3`) and explanations are ignored. If a structured block
+is absent or has no usable entries, the parser also checks surrounding prose.
+Rejected entries inside the block are excluded from that search.
+
+These explorers pass the actual checkout root as `repo_path`. Existing files
+inside that root are returned as repository-relative paths with forward slashes;
+leading `./`, backslashes, and absolute paths into the checkout are supported.
+Known container paths such as `/testbed/...` or `.../repos/<name>/...` can also
+map to an existing checkout file when the original path does not exist locally.
+Existing outside files or directories are never remapped.
+Missing files, paths outside the checkout (including symlink escapes), and
+invalid or backwards ranges are logged and skipped before applying `top_k`.
+Rejected structured entries are not retried through the prose fallback.
+
+Custom callers should also pass `repo_path` to validate locations against their
+checkout. Omitting it, or passing a blank string, keeps legacy normalization
+without filesystem validation for archived output. This behavior applies to
+`parse_relevant_files`; specialized JSON parsers and `parse_file_paths` have
+separate contracts.
+
+Run the parser and explorer integration regressions without external agent CLIs:
+
+```bash
+python3 -m unittest discover -s tests -p test_parsing.py
+```
+
 ## Metrics
 
 | Metric | Definition |
