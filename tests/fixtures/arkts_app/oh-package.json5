@@ -1,0 +1,7 @@
+{
+  // Handwritten manifest with JSON5 syntax and no external dependencies.
+  name: 'arkts-localization-fixture',
+  version: '1.0.0',
+  description: 'Tiny ArkTS project for explorer tests',
+  dependencies: {},
+}

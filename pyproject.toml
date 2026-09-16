@@ -24,3 +24,7 @@ dependencies = [
     "swebench>=4.1.0",
     "sb-cli>=0.1.5",
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
