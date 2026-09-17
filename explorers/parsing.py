@@ -83,11 +83,13 @@ def _resolve_repo_path(path: str, repo_path: str | Path) -> str | None:
     # A foreign Windows drive must not become a relative POSIX filename.
     if PureWindowsPath(path).drive and not candidate.is_absolute():
         return None
-    candidates = [candidate if candidate.is_absolute() else root / candidate]
+    # Windows does not treat a POSIX-rooted path like /testbed/x as absolute.
+    absolute = candidate.is_absolute() or path.startswith("/")
+    candidates = [candidate if absolute else root / candidate]
     # Some tools prefix relative paths with the repository directory name.
-    if not candidate.is_absolute() and candidate.parts and candidate.parts[0] == root.name:
+    if not absolute and candidate.parts and candidate.parts[0] == root.name:
         candidates.append(root.joinpath(*candidate.parts[1:]))
-    if candidate.is_absolute():
+    if absolute:
         # Recover known container prefixes only when the mapped file exists.
         relative = _normalize_path(path)
         if relative != path and not Path(relative).is_absolute():
