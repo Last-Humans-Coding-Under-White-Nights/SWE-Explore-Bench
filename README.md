@@ -154,6 +154,13 @@ Available explorers include:
 | Agentic CLIs | `claude_code`, `cursor`, `opencode`, `deveco` |
 | Academic agents | `autocr`, `cosil`, `locagent`, `orcaloca`, `mini_swe_agent`, `awe_agent` |
 
+`bm25`, `tfidf`, `potion`, `rag`, `embed`, `swerank`, and `simple_rule` share
+source-file discovery through `iter_source_files` in
+[`explorers/source_files.py`](explorers/source_files.py). That module is the
+single source of truth: `DEFAULT_EXTENSIONS` defines supported file types,
+`DEFAULT_EXCLUDED_DIRS` defines skipped directories, and the function's
+docstring documents ordering, traversal, and configuration overrides.
+
 Agent explorers can be routed through one OpenAI-compatible endpoint with `--academic-api-base`, `--academic-api-key`, and `--academic-model`; see `.env.example` and `configs/litellm_proxy.yaml`.
 
 The optional `codenib` explorer runs

@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List
+from typing import List
 
 import requests
 import typer
 
 from .base import ContextRegion, Explorer, ExplorerResult
+from .source_files import iter_source_files
 
 
 app = typer.Typer(rich_markup_mode="rich")
@@ -29,18 +30,11 @@ def _default_embed_api_key() -> str:
     return os.environ.get("RAG_EMBEDDING_API_KEY", "")
 
 
-def _iter_source_files(repo_root: Path) -> Iterable[Path]:
-    exts = {".py", ".md", ".txt"}
-    for p in repo_root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in exts:
-            yield p
-
-
 def _load_texts(repo_root: Path) -> list[tuple[str, str]]:
     docs: list[tuple[str, str]] = []
-    for p in _iter_source_files(repo_root):
+    for p in iter_source_files(repo_root):
         try:
-            text = p.read_text(errors="ignore")
+            text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         rel = p.relative_to(repo_root).as_posix()
@@ -182,4 +176,3 @@ def search(
 
 if __name__ == "__main__":
     app()
-

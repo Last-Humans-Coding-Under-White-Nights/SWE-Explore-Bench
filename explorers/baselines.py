@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List
 
 from .base import ContextRegion, Explorer, ExplorerResult
+from .source_files import iter_source_files
 
 
 class OracleExplorer(Explorer):
@@ -80,7 +81,7 @@ class SimpleRuleExplorer(Explorer):
         if not self.repo_root.is_dir():
             return []
 
-        py_files = sorted(self.repo_root.rglob("*.py"))
+        source_files = iter_source_files(self.repo_root)
 
         def priority_score(f: Path) -> tuple[int, str]:
             name = f.name
@@ -89,10 +90,10 @@ class SimpleRuleExplorer(Explorer):
                     return (i, name)
             return (len(self.PRIORITY_PATTERNS), name)
 
-        sorted_files = sorted(py_files, key=priority_score)[:top_k]
+        sorted_files = sorted(source_files, key=priority_score)[:top_k]
         regions = [
             ContextRegion(
-                path=str(f.relative_to(self.repo_root)),
+                path=f.relative_to(self.repo_root).as_posix(),
                 start=1,
                 end=100,
             )

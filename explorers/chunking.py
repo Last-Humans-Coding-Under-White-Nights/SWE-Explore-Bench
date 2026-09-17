@@ -1,12 +1,10 @@
-"""Shared chunking utilities for RAG-based explorers."""
+"""Shared chunking utilities for retrieval explorers."""
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
 
-EXTS = {".py", ".md", ".txt", ".toml", ".cfg", ".ini", ".yaml", ".yml", ".json", ".rst"}
-
+from .source_files import iter_source_files
 
 @dataclass
 class Chunk:
@@ -16,13 +14,6 @@ class Chunk:
     start: int  # 1-based start line
     end: int  # 1-based end line (inclusive)
     content: str
-
-
-def iter_source_files(repo_root: Path) -> Iterable[Path]:
-    """Yield source files matching common extensions."""
-    for p in repo_root.rglob("*"):
-        if p.is_file() and p.suffix.lower() in EXTS:
-            yield p
 
 
 def chunk_repo(
@@ -41,7 +32,7 @@ def chunk_repo(
 
     for p in iter_source_files(repo_root):
         try:
-            text = p.read_text(errors="ignore")
+            text = p.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
         lines = text.splitlines()
