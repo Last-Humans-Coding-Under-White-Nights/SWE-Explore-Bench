@@ -104,4 +104,6 @@ class CursorAgentExplorer(Explorer):
         if not output:
             return []
 
-        return parse_relevant_files(output, instance_id, top_k=top_k)
+        return parse_relevant_files(
+            output, instance_id, top_k=top_k, repo_path=self.repo_root,
+        )

@@ -176,4 +176,6 @@ class MiniSWEAgentExplorer(Explorer):
                     break
         if not submission:
             return []
-        return parse_relevant_files(submission, instance_id, top_k=top_k)
+        return parse_relevant_files(
+            submission, instance_id, top_k=top_k, repo_path=self.repo_root,
+        )

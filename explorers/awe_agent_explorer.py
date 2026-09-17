@@ -149,13 +149,17 @@ class AweAgentExplorer(Explorer):
         # Prefer structured finish payload (file -> [line numbers])
         if finish_lines:
             regions_text = self._lines_to_regions_text(finish_lines)
-            results = parse_relevant_files(regions_text, instance_id, top_k=top_k)
+            results = parse_relevant_files(
+                regions_text, instance_id, top_k=top_k, repo_path=self.repo_root,
+            )
             if results:
                 return results
 
         if not output:
             return []
-        return parse_relevant_files(output, instance_id, top_k=top_k)
+        return parse_relevant_files(
+            output, instance_id, top_k=top_k, repo_path=self.repo_root,
+        )
 
     @staticmethod
     def _lines_to_regions_text(lines_map: dict) -> str:
