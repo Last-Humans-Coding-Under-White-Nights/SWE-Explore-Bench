@@ -43,4 +43,4 @@ scripts/compare_bench_spans.py
 
 # Test suites
 !quality/tests/fixtures/*.jsonl
-
+!tests/fixtures/**/expected_locations.json

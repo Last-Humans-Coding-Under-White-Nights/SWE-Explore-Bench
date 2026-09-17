@@ -14,8 +14,8 @@ from .base import ContextRegion, ExplorerResult
 
 logger = logging.getLogger(__name__)
 
-# File extensions we recognise in fallback regex
-_SRC_EXTS = r"py|js|jsx|ts|tsx|java|go|rs|c|cpp|h|rb|php|md|txt|toml|yaml|yml|json|rst|cfg|ini|sh|ets"
+# File extensions for fallback regex; longer extensions precede their prefixes.
+_SRC_EXTS = r"json5|json|jsx|js|tsx|ts|cpp|c|py|java|go|rs|h|rb|php|md|txt|toml|yaml|yml|rst|cfg|ini|sh|ets"
 
 # Known absolute prefixes that agents may return (e.g. /opt/swe-explore/data/repos/xxx/...)
 _ABS_REPO_PATTERN = re.compile(
@@ -264,7 +264,7 @@ def parse_file_paths(
 
     # Fallback: any path-like tokens
     if not results:
-        pattern = rf"[\w/.-]+\.(?:{_SRC_EXTS})"
+        pattern = rf"[\w/.-]+\.(?:{_SRC_EXTS})\b"
         for m in re.finditer(pattern, text):
             path = _normalize_path(m.group())
             results.append(ExplorerResult(

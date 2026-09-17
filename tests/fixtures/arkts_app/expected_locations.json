@@ -1,0 +1,26 @@
+[
+  {
+    "instance_id": "arkts-next-item",
+    "query": "On the catalog page, tapping Next item never changes the selected item. Find the click handler that should advance selectedIndex.",
+    "regions": [
+      {
+        "path": "entry/src/main/ets/pages/Index.ets",
+        "start": 14,
+        "end": 16,
+        "snippet": "        .onClick(() => {\n          this.selectedIndex = this.selectedIndex;\n        })"
+      }
+    ]
+  },
+  {
+    "instance_id": "arkts-wrong-title",
+    "query": "DataSource.getTitle(0) returns Second item instead of First item. Find the method that looks up the title using the wrong index.",
+    "regions": [
+      {
+        "path": "entry/src/main/ets/model/DataSource.ets",
+        "start": 9,
+        "end": 11,
+        "snippet": "  getTitle(index: number): string {\n    return this.items[(index + 1) % this.items.length].title;\n  }"
+      }
+    ]
+  }
+]

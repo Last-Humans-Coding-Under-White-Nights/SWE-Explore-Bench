@@ -1,0 +1,15 @@
+{
+  // Minimal configuration for file discovery tests; no SDK is required.
+  app: {
+    products: [
+      { name: 'default', runtimeOS: 'HarmonyOS' },
+    ],
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [{ name: 'default', applyToProducts: ['default'] }],
+    },
+  ],
+}
