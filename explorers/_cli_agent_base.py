@@ -12,7 +12,12 @@ from pathlib import Path
 from typing import ClassVar, List
 
 from .base import Explorer, ExplorerResult
-from .parsing import extract_usage_from_jsonl, parse_relevant_files, report_usage
+from .parsing import (
+    TokenUsage,
+    extract_usage_from_jsonl,
+    parse_relevant_files,
+    report_usage,
+)
 
 EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
@@ -38,6 +43,14 @@ Do exactly this, but without modifications. You are planner, so you just provide
 
 
 ANSWER_MARKER = "RELEVANT_FILES:"
+
+# The temp home holds only this run's sessions, sub-agents included.
+SESSION_USAGE_QUERY = (
+    "select parent_id is not null as sub, sum(tokens_input) as input,"
+    " sum(tokens_output) as output, sum(tokens_reasoning) as reasoning,"
+    " sum(tokens_cache_read) as cache_read, sum(tokens_cache_write) as cache_write"
+    " from session group by sub"
+)
 
 XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 
@@ -118,6 +131,44 @@ class BaseCliAgentExplorer(Explorer):
         """Return the argv for one run. The prompt is delivered on stdin."""
         raise NotImplementedError
 
+    def _collect_usage(self, stdout_text: str, env: dict[str, str]) -> TokenUsage | None:
+        """Token usage of the finished run; called before the temp home is removed."""
+        try:
+            proc = subprocess.run(
+                [self.bin_path, "db", SESSION_USAGE_QUERY, "--format", "json"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                env=env,
+            )
+            usage = TokenUsage()
+            for row in json.loads(proc.stdout):
+                part = TokenUsage(
+                    input_tokens=row["input"],
+                    output_tokens=row["output"],
+                    cache_read_tokens=row["cache_read"],
+                    cache_write_tokens=row["cache_write"],
+                    reasoning_tokens=row["reasoning"],
+                    # Reasoning is reported beside output, not inside it.
+                    separate_reasoning_tokens=row["reasoning"],
+                )
+                if row["sub"]:
+                    part.subagent_tokens = part.total
+                usage.add(part)
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError):
+            usage = None
+        if usage is None or not usage.has_any():
+            _log(
+                f"{self.cli_display_name}: session store unreadable, "
+                "token usage excludes sub-agents if there were any",
+                level="info",
+            )
+            return extract_usage_from_jsonl(stdout_text)
+        return usage
+
     def _format_prompt(self, query: str, top_k: int) -> str:
         return self.prompt_template.format(
             issue=query, top_k=top_k, prompt_additions=self.prompt_additions
@@ -193,12 +244,13 @@ class BaseCliAgentExplorer(Explorer):
                 f"in {time.perf_counter() - proc_t0:.1f}s "
                 f"(stdout={len(stdout_text)}B stderr={len(stderr_text)}B){tail}"
             )
+            usage = self._collect_usage(stdout_text, env)
 
         output = _extract_output_text(stdout_text)
-        # Best-effort: collect token usage from JSON event fields. Done
-        # before the rc check below can raise, so failed-but-expensive runs
-        # still hand their spend to the collector (see _eval_one).
-        report_usage(extract_usage_from_jsonl(stdout_text))
+        # Best-effort: report token usage before the rc check below can
+        # raise, so failed-but-expensive runs still hand their spend to the
+        # collector (see _eval_one).
+        report_usage(usage)
 
         if completed.returncode != 0:
             stdout_preview = (completed.stdout or "")[-2000:]
