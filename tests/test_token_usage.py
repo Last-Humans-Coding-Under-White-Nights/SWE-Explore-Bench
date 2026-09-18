@@ -1,5 +1,10 @@
 """Tests for token-usage extraction from provider outputs."""
+import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
 
 from explorers.parsing import (
     TokenUsage,
@@ -8,6 +13,7 @@ from explorers.parsing import (
     report_usage,
     usage_collector,
 )
+from explorers.opencode import OpenCodeExplorer
 
 
 def test_extract_anthropic_style_usage():
@@ -229,7 +235,7 @@ def test_extract_usage_from_jsonl_empty():
 
 
 def test_token_usage_roundtrip_and_add():
-    a = TokenUsage(input_tokens=10, output_tokens=2, reasoning_tokens=3)
+    a = TokenUsage(input_tokens=10, output_tokens=2, reasoning_tokens=3, subagent_tokens=4)
     assert a.total == 12
     assert TokenUsage(cache_read_tokens=99, cache_write_tokens=99).total == 0
     b = TokenUsage.from_dict(a.to_dict())
@@ -282,3 +288,41 @@ def test_report_usage_collector_accumulates_per_thread():
     assert all(t.output_tokens == 1 for t in trackers)
 
     report_usage(TokenUsage(input_tokens=999))
+
+
+
+def _collect_with_db(monkeypatch, db_stdout, stdout_text=""):
+    monkeypatch.setattr(
+        "explorers._cli_agent_base.subprocess.run",
+        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=db_stdout),
+    )
+    return OpenCodeExplorer(repo_root=Path("."))._collect_usage(stdout_text, env={})
+
+
+def test_opencode_usage_includes_subagent_sessions(monkeypatch):
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+    rows = [dict(zip(cols, (1, 2, 3, 4, 5)), sub=0), dict(zip(cols, (10, 20, 30, 40, 50)), sub=1)]
+
+    usage = _collect_with_db(monkeypatch, json.dumps(rows))
+
+    assert usage == TokenUsage(
+        input_tokens=11,
+        output_tokens=22,
+        reasoning_tokens=33,
+        separate_reasoning_tokens=33,
+        cache_read_tokens=44,
+        cache_write_tokens=55,
+        subagent_tokens=60,
+    )
+
+
+@pytest.mark.parametrize(
+    "db_stdout", ['{"error": "x"}', '[{"sub": 0, "input": 0, "output": 0, "reasoning": 0, '
+                  '"cache_read": 0, "cache_write": 0}]'],
+)
+def test_opencode_usage_falls_back_to_stream(monkeypatch, db_stdout):
+    step = {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}
+
+    usage = _collect_with_db(monkeypatch, db_stdout, json.dumps(step))
+
+    assert usage == TokenUsage(input_tokens=10, output_tokens=5)

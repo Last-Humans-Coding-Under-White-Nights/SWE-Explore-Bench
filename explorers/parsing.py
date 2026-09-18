@@ -602,6 +602,7 @@ class TokenUsage:
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     separate_reasoning_tokens: int = 0
+    subagent_tokens: int = 0
 
     _CATEGORIES = (
         "input_tokens",
@@ -610,6 +611,7 @@ class TokenUsage:
         "cache_write_tokens",
         "reasoning_tokens",
         "separate_reasoning_tokens",
+        "subagent_tokens",
     )
 
     def add(self, other: "TokenUsage | None") -> None:
@@ -635,6 +637,7 @@ class TokenUsage:
             "reasoning": self.reasoning_tokens,
             "total": self.total,
             "separate_reasoning": self.separate_reasoning_tokens,
+            "subagent_total": self.subagent_tokens,
         }
 
     @classmethod
@@ -652,6 +655,7 @@ class TokenUsage:
             cache_write_tokens=int(data.get("cache_write") or 0),
             reasoning_tokens=int(data.get("reasoning") or 0),
             separate_reasoning_tokens=separate,
+            subagent_tokens=int(data.get("subagent_total") or 0),
         )
 
 
