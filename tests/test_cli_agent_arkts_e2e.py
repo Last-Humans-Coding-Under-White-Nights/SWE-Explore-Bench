@@ -159,7 +159,7 @@ class RecordingRun:
 
     def __call__(self, *args, **kwargs):  # type: ignore[no-untyped-def]
         completed = _REAL_RUN(*args, **kwargs)
-        self.tool_events = [
+        self.tool_events += [
             event for event in iter_events(completed.stdout)
             if event.get("type") == "tool_use"
         ]
