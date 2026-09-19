@@ -145,6 +145,14 @@ uv run python eval_runner.py \
 
 `--issue-map` is optional when the benchmark file already contains `problem_statement`; otherwise it can provide `{instance_id: issue_text}`.
 
+`--resume` continues the existing `--output` files instead of starting over:
+
+- A case counts as done only when it is present in *every* `top_k` file. One that an interrupt left in some files but not others is dropped from disk and re-run, so it contributes exactly one row per budget and a resumed run reports the same numbers as an uninterrupted one.
+- Each explorer and budget needs a file of its own, so keep `{explorer}` and `{k}` in `--output`. A result row records no `top_k`, so budgets sharing one file cannot be told apart and the run stops rather than guess.
+- If a `top_k` file is missing entirely — you added a budget, or changed `--output` — the run stops instead of discarding the rows the other budgets already hold.
+
+Without `--resume` the output files are rewritten from scratch.
+
 Available explorers include:
 
 | Family | Explorers |
