@@ -28,3 +28,7 @@ dependencies = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# Paired with PYTHONWARNDEFAULTENCODING=1 (set in CI): text I/O without an
+# explicit encoding fails the suite instead of silently using the platform
+# default, which differs between the Linux and Windows runners.
+filterwarnings = ["error::EncodingWarning"]

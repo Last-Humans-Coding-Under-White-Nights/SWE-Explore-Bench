@@ -110,7 +110,7 @@ def _load_issue_map(trajs_dir: Path) -> dict[str, str]:
     issue_map: dict[str, str] = {}
     for p in trajs_dir.rglob("*.json"):
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
         info = data.get("info") or {}
@@ -179,7 +179,7 @@ def _build_file_line_counts(
             fpath = repo_dir / rel
             if fpath.is_file():
                 try:
-                    per[rel] = len(fpath.read_text(errors="ignore").splitlines())
+                    per[rel] = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
                 except OSError:
                     pass
         if per:
@@ -594,7 +594,7 @@ def run(
 
     issue_map: dict[str, str] = {}
     if issue_map_file and issue_map_file.is_file():
-        with open(issue_map_file) as f:
+        with open(issue_map_file, encoding="utf-8") as f:
             issue_map = json.load(f)
     elif trajs_dir and trajs_dir.is_dir():
         issue_map = _load_issue_map(trajs_dir)

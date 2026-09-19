@@ -112,7 +112,7 @@ def load_scaleswe_dataset(
 
     for part_file in part_files:
         console.log(f"Loading {part_file.name}...")
-        with part_file.open() as f:
+        with part_file.open(encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -129,7 +129,7 @@ def load_scaleswe_dataset(
                         trajectories.append(traj)
                         if output_dir is not None:
                             out_file = out / f"{instance_id}.json"
-                            with out_file.open("w") as fp:
+                            with out_file.open("w", encoding="utf-8") as fp:
                                 json.dump(traj.model_dump(), fp, ensure_ascii=False)
                 except Exception as e:
                     failed += 1

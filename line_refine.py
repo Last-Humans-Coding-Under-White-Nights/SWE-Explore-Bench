@@ -35,7 +35,7 @@ class LineRegion:
 
 
 def _load_bench_records(path: Path) -> Iterable[dict[str, Any]]:
-    with path.open("r") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -75,7 +75,7 @@ def _load_context_map(
         return {}
 
     context_map: dict[str, dict[str, str]] = {}
-    with path.open("r") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -717,7 +717,7 @@ def coarse(
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress,
-        output.open("w") as fout,
+        output.open("w", encoding="utf-8") as fout,
     ):
         task = progress.add_task("Coarse refining...", total=len(records))
         for rec in records:
@@ -835,7 +835,7 @@ def refine(
             console=console,
         ) as progress:
             task = progress.add_task(mode_desc + "...", total=len(records))
-            fout = output.open("w") if output is not None else None
+            fout = output.open("w", encoding="utf-8") if output is not None else None
             try:
                 for rec in records:
                     instance_id = rec.get("instance_id", "")
@@ -873,7 +873,7 @@ def refine(
                 TextColumn("[progress.description]{task.description}"),
                 console=console,
             ) as progress,
-            output.open("w") as fout,
+            output.open("w", encoding="utf-8") as fout,
         ):
             task = progress.add_task(mode_desc + "...", total=len(records))
             for rec in records:

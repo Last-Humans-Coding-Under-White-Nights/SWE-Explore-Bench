@@ -18,3 +18,7 @@ jobs:
           enable-cache: true
       - run: uv sync --locked
       - run: uv run --with pytest python -m pytest tests
+        env:
+          # Make text I/O that relies on the platform default encoding a test
+          # failure, so a cp1252 Windows runner cannot mangle non-ASCII paths.
+          PYTHONWARNDEFAULTENCODING: "1"

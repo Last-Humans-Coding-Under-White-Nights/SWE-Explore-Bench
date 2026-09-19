@@ -65,6 +65,8 @@ class LocalBashSession:
                 text=True,
                 timeout=timeout or 60,
                 env={**os.environ, **(env or {})},
+                encoding="utf-8",
+                errors="replace",
             )
             return result.returncode, result.stdout, result.stderr
 

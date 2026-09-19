@@ -23,7 +23,7 @@ def _load_done_ids(path: Path) -> set[str]:
     if not path.exists():
         return set()
     done: set[str] = set()
-    with path.open("r") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -42,14 +42,14 @@ def _default_checkpoint_path(output: Path) -> Path:
 def _write_checkpoint(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
 
 
 def _load_checkpoint(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _remaining_calls(
@@ -178,7 +178,7 @@ def main(
             TextColumn("[progress.description]{task.description}"),
             console=console,
         ) as progress,
-        output.open("a") as fout,
+        output.open("a", encoding="utf-8") as fout,
     ):
         task = progress.add_task("Running line refine calls...", total=total_calls_budget)
         stop_early = False

@@ -389,6 +389,7 @@ SWE-Explore-Bench/
 |-- eval.py                     # ExploreEvaluator and metrics
 |-- eval_runner.py              # CLI driver for all explorers
 |-- stats.py                    # Benchmark-level statistics
+|-- tests/                      # Test suite (see Tests below)
 |-- explorers/                  # Retrieval, agentic, and academic explorer wrappers
 |-- quality/                    # Downstream patch-quality validation
 |-- traj_datasets/              # Trajectory loaders and unified Pydantic schema
@@ -397,6 +398,14 @@ SWE-Explore-Bench/
 |-- figures/                    # Paper figures used by this README
 `-- pyproject.toml
 ```
+
+## Tests
+
+```bash
+uv run --with pytest python -m pytest tests
+```
+
+CI runs that on Linux and Windows with `PYTHONWARNDEFAULTENCODING=1`, so any text I/O that relies on the platform default encoding fails the suite — always pass `encoding="utf-8"` when opening or reading a text file, since the default is UTF-8 on Linux but cp1252 on Windows.
 
 ## Citation
 

@@ -298,7 +298,7 @@ def resolve_entity_lines(
     if not full.is_file():
         return None
     try:
-        source = full.read_text(errors="ignore")
+        source = full.read_text(encoding="utf-8", errors="ignore")
         tree = ast.parse(source)
     except (SyntaxError, UnicodeDecodeError):
         return None
@@ -343,7 +343,7 @@ def parse_locagent_jsonl(
     if not p.is_file():
         return []
 
-    for line in p.read_text().splitlines():
+    for line in p.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         rec = json.loads(line)
@@ -448,7 +448,7 @@ def parse_orcaloca_output(
     if not p.is_file():
         return []
 
-    data = json.loads(p.read_text())
+    data = json.loads(p.read_text(encoding="utf-8"))
     entry = data.get(instance_id)
     if not entry:
         return []
@@ -505,7 +505,7 @@ def parse_cosil_jsonl(
     if not p.is_file():
         return []
 
-    for line in p.read_text().splitlines():
+    for line in p.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         rec = json.loads(line)
@@ -550,7 +550,7 @@ def parse_acr_bug_locations(
     if not p.is_file():
         return []
 
-    data = json.loads(p.read_text())
+    data = json.loads(p.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         return []
 

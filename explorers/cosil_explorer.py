@@ -93,7 +93,7 @@ class CoSILExplorer(Explorer):
                 "problem_statement": query,
                 "patch": "",
             }
-            with open(dataset_file, "w") as f:
+            with open(dataset_file, "w", encoding="utf-8") as f:
                 f.write(json.dumps(instance_data) + "\n")
 
             # Create the API-patching wrapper script
@@ -184,7 +184,7 @@ class CoSILExplorer(Explorer):
 
         import tempfile as _tf
         gen_script_path = os.path.join(_tf.gettempdir(), f"gen_struct_{instance_id}.py")
-        with open(gen_script_path, "w") as f:
+        with open(gen_script_path, "w", encoding="utf-8") as f:
             f.write(f"""import sys, json, os
 sys.path.insert(0, "{self.cosil_path}")
 from get_repo_structure.get_repo_structure import create_structure
@@ -271,6 +271,6 @@ else:
     sys.argv = ["AFL_localize_func.py"] + remaining
     exec(open("afl/fl/AFL_localize_func.py").read())
 '''
-        with open(wrapper_path, "w") as f:
+        with open(wrapper_path, "w", encoding="utf-8") as f:
             f.write(script)
         return wrapper_path

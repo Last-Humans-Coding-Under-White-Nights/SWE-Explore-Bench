@@ -203,7 +203,7 @@ def load_nebius_dataset(
                 run_idx = run_counter.get(instance_id, 0)
                 run_counter[instance_id] = run_idx + 1
                 output_file = output_path / f"{instance_id}__{run_idx}.json"
-                with open(output_file, "w") as f:
+                with open(output_file, "w", encoding="utf-8") as f:
                     json.dump(
                         unified_traj.model_dump(), f, indent=2, ensure_ascii=False
                     )

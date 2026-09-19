@@ -73,12 +73,12 @@ class AutoCodeRoverExplorer(Explorer):
 
             # Write issue text to a file
             issue_file = os.path.join(tmpdir, "issue.txt")
-            with open(issue_file, "w") as f:
+            with open(issue_file, "w", encoding="utf-8") as f:
                 f.write(query)
 
             # Write a shim script that patches ACR's runtime environment
             shim_path = os.path.join(tmpdir, "acr_shim.py")
-            with open(shim_path, "w") as sf:
+            with open(shim_path, "w", encoding="utf-8") as sf:
                 sf.write(f"""import sys, os, argparse
 
 # 1. Inject ACR root into sys.path
@@ -161,8 +161,8 @@ runpy.run_path(os.path.join("{self.acr_path}", "app", "main.py"), run_name="__ma
                 if _dbg.exists():
                     _shutil.rmtree(str(_dbg))
                 _dbg.mkdir(parents=True, exist_ok=True)
-                (_dbg / "stdout.txt").write_text(getattr(proc, "stdout", "") or "")
-                (_dbg / "stderr.txt").write_text(getattr(proc, "stderr", "") or "")
+                (_dbg / "stdout.txt").write_text(getattr(proc, "stdout", "") or "", encoding="utf-8")
+                (_dbg / "stderr.txt").write_text(getattr(proc, "stderr", "") or "", encoding="utf-8")
                 # Snapshot ACR's full output tree so we can inspect what was actually written
                 try:
                     _shutil.copytree(output_dir, str(_dbg / "output"), dirs_exist_ok=True)

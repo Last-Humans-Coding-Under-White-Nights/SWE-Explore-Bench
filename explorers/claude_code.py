@@ -104,6 +104,8 @@ class ClaudeCodeExplorer(Explorer):
                 text=True,
                 timeout=self.timeout,
                 env=env,
+                encoding="utf-8",
+                errors="replace",
             )
             raw = completed.stdout.strip()
         except FileNotFoundError:

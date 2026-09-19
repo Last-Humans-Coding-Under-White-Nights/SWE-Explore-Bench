@@ -56,6 +56,8 @@ def run_in_conda(
         cwd=cwd,
         env=merged_env,
         start_new_session=True,  # new process group for clean kill
+        encoding="utf-8",
+        errors="replace",
     )
     try:
         stdout, stderr = process.communicate(timeout=timeout)

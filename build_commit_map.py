@@ -72,7 +72,7 @@ def build(
 
     # 保存到 JSON
     output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         json.dump(all_mappings, f, indent=2)
 
     console.print(f"\n[bold green]Done![/bold green] Saved {len(all_mappings)} mappings to {output}")
@@ -85,7 +85,7 @@ def stats(
     """
     显示 commit_map 的统计信息。
     """
-    with open(commit_map) as f:
+    with open(commit_map, encoding="utf-8") as f:
         mapping = json.load(f)
 
     console.print(f"Total instances: {len(mapping)}")

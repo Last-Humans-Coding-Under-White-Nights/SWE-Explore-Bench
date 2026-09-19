@@ -56,7 +56,7 @@ class _Result:
 
 def _load_predictions(path: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -70,7 +70,7 @@ def _load_predictions(path: Path) -> dict[str, dict]:
 
 def _load_bench(path: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             obj = json.loads(line)
             out[obj["instance_id"]] = obj
@@ -253,7 +253,7 @@ def _eval_one(
 def _save_result(out_dir: Path, r: _Result) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / f"{r.instance_id}.log"
-    log_path.write_text(r.raw_log)
+    log_path.write_text(r.raw_log, encoding="utf-8")
     json_path = out_dir / f"{r.instance_id}.json"
     json_path.write_text(json.dumps(
         {
@@ -264,7 +264,7 @@ def _save_result(out_dir: Path, r: _Result) -> None:
             "pass_to_pass_results": r.pass_to_pass_results,
         },
         indent=2,
-    ))
+    ), encoding="utf-8")
 
 
 def main() -> int:
@@ -311,7 +311,7 @@ def main() -> int:
         result_json = per_inst_dir / f"{iid}.json"
         if result_json.exists():
             try:
-                prior = json.loads(result_json.read_text())
+                prior = json.loads(result_json.read_text(encoding="utf-8"))
                 if args.skip_resolved or "resolved" in prior:
                     print(f"[cache] {iid}: already evaluated (resolved={prior.get('resolved')}), skipping")
                     continue
@@ -356,7 +356,7 @@ def main() -> int:
     for iid, _pred in instances:
         rj = per_inst_dir / f"{iid}.json"
         if rj.exists():
-            all_results.append(json.loads(rj.read_text()))
+            all_results.append(json.loads(rj.read_text(encoding="utf-8")))
 
     resolved_ids = sorted(r["instance_id"] for r in all_results if r["resolved"])
     unresolved_ids = sorted(r["instance_id"] for r in all_results if not r["resolved"] and not r.get("error"))
@@ -374,7 +374,7 @@ def main() -> int:
         "bench_path": str(args.bench),
         "elapsed_seconds": round(time.time() - started, 2),
     }
-    (out_root / "eval_summary.json").write_text(json.dumps(summary, indent=2))
+    (out_root / "eval_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(json.dumps(
         {k: summary[k] for k in ("total", "resolved", "resolve_rate", "elapsed_seconds")},
         indent=2,
