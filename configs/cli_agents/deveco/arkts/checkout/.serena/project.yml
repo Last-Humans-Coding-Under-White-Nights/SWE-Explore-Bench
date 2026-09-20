@@ -1,0 +1,24 @@
+# Serena project file. The explorer copies every file under this profile's
+# checkout/ directory into the repository for the run and removes it again
+# afterwards; see ../../../README.md, "Semantic navigation over MCP".
+project_name: swe-explore-checkout
+language_servers: [typescript]
+read_only: true
+ignore_all_files_in_gitignore: true
+excluded_tools:
+  - create_text_file
+  - replace_symbol_body
+  - replace_content
+  - replace_in_files
+  - replace_lines
+  - replace_regex
+  - insert_after_symbol
+  - insert_before_symbol
+  - insert_at_line
+  - delete_lines
+  - delete_memory
+  - rename_symbol
+  - execute_shell_command
+  - write_memory
+  - edit_memory
+  - remove_project

@@ -1,7 +1,6 @@
 """Shared base for explorers that shell out to a coding-agent CLI."""
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -12,7 +11,12 @@ from pathlib import Path
 from typing import ClassVar, List
 
 from .base import Explorer, ExplorerResult
-from .parsing import extract_usage_from_jsonl, parse_relevant_files, report_usage
+from .parsing import (
+    extract_usage_from_jsonl,
+    iter_events,
+    parse_relevant_files,
+    report_usage,
+)
 
 EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
@@ -40,6 +44,10 @@ Do exactly this, but without modifications. You are planner, so you just provide
 ANSWER_MARKER = "RELEVANT_FILES:"
 
 XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+#: Subdirectory of a profile whose files are placed into the checkout per run.
+CHECKOUT_SEED_DIR = "checkout"
+#: A file written into the checkout for one run, with the content written.
+SeededFile = tuple[Path, bytes]
 
 LOG_LEVELS = {"info": 0, "debug": 1, "trace": 2}
 _log_level = 0
@@ -67,16 +75,8 @@ def _extract_output_text(raw: str) -> str:
 
     texts: list[str] = []
     saw_event = False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # One malformed event must not discard the rest of the stream.
-            continue
-        if not isinstance(event, dict) or "type" not in event:
+    for event in iter_events(raw):
+        if "type" not in event:
             continue
         saw_event = True
         if event["type"] != "text":
@@ -140,6 +140,41 @@ class BaseCliAgentExplorer(Explorer):
             raise FileNotFoundError(f"{self.config_filename} not found at {config_src}")
         env[self.config_env_var] = str(self.config_dir.resolve())
 
+    def _seed_checkout(self) -> list[SeededFile]:
+        """Copy ``<config_dir>/checkout/**`` into the repository for one run.
+
+        A profile can carry files a tool needs to find inside the checkout
+        (an MCP server's project file, for instance). Files the checkout
+        already has are left alone. Returns what was written so
+        ``_unseed_checkout`` can take it back out.
+        """
+        if self.config_dir is None:
+            return []
+        seed_root = self.config_dir / CHECKOUT_SEED_DIR
+        if not seed_root.is_dir():
+            return []
+        seeded: list[SeededFile] = []
+        for source in sorted(p for p in seed_root.rglob("*") if p.is_file()):
+            target = self.repo_root / source.relative_to(seed_root)
+            if target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            content = source.read_bytes()
+            target.write_bytes(content)
+            seeded.append((target, content))
+        return seeded
+
+    def _unseed_checkout(self, seeded: list[SeededFile]) -> None:
+        """Remove seeded files the run left unchanged, then any directories
+        that this emptied. Anything the run changed or added stays."""
+        for target, content in seeded:
+            if target.is_file() and target.read_bytes() == content:
+                target.unlink()
+            parent = target.parent
+            while parent != self.repo_root and not any(parent.iterdir()):
+                parent.rmdir()
+                parent = parent.parent
+
     def explore(
         self, *, instance_id: str, query: str, top_k: int = 5
     ) -> List[ExplorerResult]:
@@ -158,6 +193,7 @@ class BaseCliAgentExplorer(Explorer):
         with tempfile.TemporaryDirectory(prefix="cli-agent-home-") as tmp_home:
             self._isolate_env(env, Path(tmp_home))
             self._prepare_config(env)
+            seeded = self._seed_checkout()
 
             try:
                 completed = subprocess.run(
@@ -184,6 +220,8 @@ class BaseCliAgentExplorer(Explorer):
                 raise RuntimeError(
                     f"{self.cli_display_name} timed out after {self.timeout}s"
                 )
+            finally:
+                self._unseed_checkout(seeded)
 
             stderr_text = completed.stderr or ""
             stdout_text = completed.stdout or ""

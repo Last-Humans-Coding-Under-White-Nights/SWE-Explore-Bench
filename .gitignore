@@ -44,3 +44,9 @@ scripts/compare_bench_spans.py
 # Test suites
 !quality/tests/fixtures/*.jsonl
 !tests/fixtures/**/expected_locations.json
+
+# Example CLI-agent profiles (credential-free, {env:...} references only)
+!configs/cli_agents/opencode/arkts/opencode.json
+!configs/cli_agents/opencode/arkts-no-mcp/opencode.json
+!configs/cli_agents/deveco/arkts/deveco.json
+!configs/cli_agents/deveco/arkts-no-mcp/deveco.json

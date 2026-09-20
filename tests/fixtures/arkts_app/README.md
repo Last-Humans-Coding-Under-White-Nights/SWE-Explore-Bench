@@ -34,4 +34,6 @@ can be selected explicitly with `pytest quality/tests/`.
 
 These tests do not run ArkTS code or measure an explorer's ability to solve the
 example queries. Other tests can use this directory as their repository root
-and load the same JSON answers.
+and load the same JSON answers. A test that hands the directory to an agent
+should copy it without `expected_locations.json` and this README, which
+together give the answers away; `tests/test_cli_agent_arkts_e2e.py` does so.

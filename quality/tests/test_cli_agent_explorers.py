@@ -62,7 +62,7 @@ CLI_EXPLORER_CASES = (
         explorer_cls=DevEcoExplorer,
         bin_path="deveco-test",
         build_expected_cmd=lambda binary, repo: [
-            binary, "run", "--format", "json", "--dir", repo,
+            binary, "run", "--auto", "--format", "json", "--dir", repo,
             "--dangerously-skip-permissions",
         ],
         expected_config_env_var="DEVECO_CONFIG_DIR",
@@ -264,7 +264,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
 
 
 class DevEcoInvocationTest(unittest.TestCase):
-    """Guards the parts of the deveco 0.1.9 contract that are easy to get wrong."""
+    """Guards the parts of the deveco argv contract that are easy to get wrong."""
 
     def _cmd_for(self, **kwargs) -> list[str]:  # type: ignore[no-untyped-def]
         with tempfile.TemporaryDirectory() as repo:
@@ -276,15 +276,89 @@ class DevEcoInvocationTest(unittest.TestCase):
         self.assertNotIn("-p", cmd)
         self.assertNotIn("--password", cmd)
 
-    def test_no_auto_flag_is_sent(self) -> None:
-        """``--auto`` is OpenCode-only; deveco 0.1.9 does not define it."""
-        self.assertNotIn("--auto", self._cmd_for())
+    def test_auto_flag_is_always_sent(self) -> None:
+        """deveco 0.1.12 resolves ``ask`` rules with ``--auto`` and ignores the
+        skip flag below; 0.1.9 ignores unknown flags, so both are sent."""
+        self.assertIn("--auto", self._cmd_for())
+        self.assertIn("--auto", self._cmd_for(skip_permissions=False))
 
     def test_skip_permissions_can_be_disabled(self) -> None:
         self.assertIn("--dangerously-skip-permissions", self._cmd_for())
         self.assertNotIn(
             "--dangerously-skip-permissions", self._cmd_for(skip_permissions=False)
         )
+
+
+def _snapshot(root: Path) -> dict[str, str]:
+    """Relative path -> text for every file under ``root``."""
+    return {
+        p.relative_to(root).as_posix(): p.read_text(encoding="utf-8")
+        for p in sorted(root.rglob("*")) if p.is_file()
+    }
+
+
+def _write(root: Path, relative: str, text: str) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+class CheckoutSeedingTest(unittest.TestCase):
+    """Files under ``<config_dir>/checkout`` are placed into the repository for
+    the run (a Serena project file, for instance) and removed again afterwards
+    unless the run changed them. Files the checkout already has are never
+    overwritten."""
+
+    def setUp(self) -> None:
+        self.repo = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.cfg = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        _write(self.repo, "README.md", "original")
+        _write(self.cfg, "opencode.json", "{}")
+
+    def _run(self, during_run=None) -> dict[str, str]:  # type: ignore[no-untyped-def]
+        """Explore once; return the checkout as the CLI saw it."""
+        seen: dict[str, str] = {}
+
+        def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            seen.update(_snapshot(self.repo))
+            if during_run:
+                during_run()
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        explorer = OpenCodeExplorer(repo_root=self.repo, bin_path="x", config_dir=self.cfg)
+        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+            explorer.explore(instance_id="inst-1", query="issue")
+        return seen
+
+    def test_seed_files_exist_during_the_run_and_are_removed_after(self) -> None:
+        _write(self.cfg, "checkout/.serena/project.yml", "read_only: true\n")
+        _write(self.cfg, "checkout/README.md", "from profile")
+
+        during = self._run()
+
+        self.assertEqual(during, {"README.md": "original",
+                                  ".serena/project.yml": "read_only: true\n"})
+        self.assertEqual(_snapshot(self.repo), {"README.md": "original"})
+        self.assertFalse((self.repo / ".serena").exists())
+
+    def test_seed_file_changed_by_the_run_is_left_in_place(self) -> None:
+        _write(self.cfg, "checkout/.serena/project.yml", "a\n")
+
+        def mutate() -> None:
+            _write(self.repo, ".serena/project.yml", "b\n")
+            _write(self.repo, ".serena/cache/index", "")
+
+        self._run(during_run=mutate)
+
+        self.assertEqual(_snapshot(self.repo), {
+            "README.md": "original",
+            ".serena/project.yml": "b\n",
+            ".serena/cache/index": "",
+        })
+
+    def test_no_checkout_dir_means_no_seeding(self) -> None:
+        self.assertEqual(self._run(), {"README.md": "original"})
+        self.assertEqual(_snapshot(self.repo), {"README.md": "original"})
 
 
 class ExtractOutputTextTest(unittest.TestCase):

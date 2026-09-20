@@ -1,0 +1,85 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "swe-explore/gpt-5.4",
+  "provider": {
+    "swe-explore": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "SWE-Explore LiteLLM proxy",
+      "options": {
+        "baseURL": "{env:ACADEMIC_API_BASE}",
+        "apiKey": "{env:ACADEMIC_API_KEY}"
+      },
+      "models": {
+        "gpt-5.4": {
+          "name": "gpt-5.4 via configs/litellm_proxy.yaml",
+          "limit": {
+            "context": 200000,
+            "output": 65536
+          }
+        }
+      }
+    }
+  },
+  "permission": {
+    "read": "allow",
+    "list": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "lsp": "allow",
+    "task": "deny",
+    "todowrite": "allow",
+    "skill": "deny",
+    "question": "deny",
+    "edit": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "external_directory": "deny",
+    "doom_loop": "allow",
+    "bash": "deny"
+  },
+  "tools": {
+    "write": false,
+    "edit": false,
+    "patch": false,
+    "multiedit": false,
+    "bash": false,
+    "task": false,
+    "serena_create_text_file": false,
+    "serena_replace*": false,
+    "serena_insert*": false,
+    "serena_delete*": false,
+    "serena_rename_symbol": false,
+    "serena_execute_shell_command": false,
+    "serena_write_memory": false,
+    "serena_edit_memory": false,
+    "serena_remove_project": false
+  },
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": [
+        "serena",
+        "start-mcp-server",
+        "--context",
+        "ide",
+        "--mode",
+        "planning",
+        "--mode",
+        "no-onboarding",
+        "--enable-web-dashboard",
+        "false",
+        "--enable-gui-log-window",
+        "false",
+        "--project-from-cwd"
+      ],
+      "environment": {
+        "SERENA_HOME": "{env:SWE_EXPLORE_SERENA_HOME}"
+      },
+      "enabled": false,
+      "timeout": 60000
+    }
+  },
+  "share": "disabled",
+  "autoupdate": false,
+  "snapshot": false
+}
