@@ -461,7 +461,7 @@ for root, dirs, files in os.walk(workdir):
         if rel_path in keep_files:
             continue
         if fname == '__init__.py':
-            open(abs_path, 'w').close()
+            open(abs_path, 'w', encoding='utf-8').close()
             continue
         try:
             os.remove(abs_path)
@@ -473,7 +473,7 @@ for rel_path, regions in region_map.items():
     abs_path = os.path.join(workdir, rel_path)
     if not os.path.isfile(abs_path):
         continue
-    with open(abs_path, 'r', errors='replace') as f:
+    with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
         lines = f.readlines()
     kept = set()
     n = len(lines)
