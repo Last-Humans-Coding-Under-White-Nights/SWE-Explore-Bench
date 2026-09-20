@@ -210,7 +210,10 @@ def _load_existing_results(path: Path) -> list[dict]:
     if not path.is_file():
         return []
     rows = []
-    with path.open(encoding="utf-8") as f:
+    # A file written before results were UTF-8 everywhere (a Windows run wrote
+    # cp1252) or holding bytes from an agent CLI must not abort the resume:
+    # replace what cannot be decoded and let json.loads keep or skip the line.
+    with path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -228,6 +231,17 @@ def _dump_row(row: dict) -> str:
     return json.dumps(row, ensure_ascii=False) + "\n"
 
 
+def _case_ids(rows: list[dict]) -> set[str]:
+    """The instance_ids in `rows`, skipping rows that identify no case.
+
+    A missing, null or empty id can be matched against no bench record and
+    re-run for none either, and an empty one would stand in for every bench
+    record that has no id of its own.
+    """
+    iids = (r.get("instance_id") for r in rows)
+    return {iid for iid in iids if isinstance(iid, str) and iid}
+
+
 def _dedupe_rows(rows: list[dict], keep: set[str]) -> list[dict]:
     """One row per instance_id (the last one wins), restricted to `keep`."""
     latest: dict[str, dict] = {}
@@ -239,11 +253,17 @@ def _dedupe_rows(rows: list[dict], keep: set[str]) -> list[dict]:
 
 
 def _rewrite_results(path: Path, rows: list[dict]) -> None:
-    """Replace a JSONL result file with `rows`, atomically."""
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    """Replace a JSONL result file with `rows`, atomically.
+
+    Written through to the real file: an output path symlinked to shared
+    storage must keep pointing there, and the temporary file has to land on
+    the target's filesystem for the replace to be atomic.
+    """
+    target = path.resolve()
+    tmp = target.with_suffix(target.suffix + ".tmp")
     with tmp.open("w", encoding="utf-8") as f:
         f.writelines(_dump_row(row) for row in rows)
-    tmp.replace(path)
+    tmp.replace(target)
 
 
 def _append_row(fh, row: dict) -> None:
@@ -305,22 +325,15 @@ def _check_resume_outputs(
             seen[path] = (explorer, k)
 
 
-def _reconcile_resume_state(
+def _load_resume_state(
     output_jsonl: str, explorer: str, top_k_list: list[int]
-) -> tuple[set[str], dict[int, list[dict]]]:
-    """Prune an explorer's result files to the cases finished at every budget.
+) -> tuple[dict[int, Path], dict[int, list[dict]]]:
+    """Read an explorer's result files, rejecting a layout it cannot prune.
 
-    Results for one case are written to one file per top_k budget in sequence,
-    so an interrupt in that gap can leave the case in some files but not
-    others. Only cases present in ALL of them count as resumed; the rest are
-    dropped from disk here, so re-running them replaces their rows instead of
-    appending a second set and scoring the case twice. Each existing file is
-    rewritten whole, which also repairs a line left half-written by a hard kill.
-
-    Callers validate the output layout with `_check_resume_outputs` first, so
-    every budget here has a file of its own.
-
-    Returns the resumed instance_ids and the surviving rows per top_k.
+    Callers validate the output template with `_check_resume_outputs` first, so
+    every budget here has a file of its own. Reads nothing back into the run:
+    this only decides whether the files on disk belong to the run being
+    resumed, so it is safe to call for every explorer before any of them runs.
     """
     out_paths = {k: _format_output_path(output_jsonl, explorer, k) for k in top_k_list}
     existing = {k: _load_existing_results(path) for k, path in out_paths.items()}
@@ -330,7 +343,9 @@ def _reconcile_resume_state(
     # be scored as ours and then rewritten away. A row with no explorer
     # recorded predates the field and is taken as ours.
     for k, rows in existing.items():
-        foreign = sorted({r.get("explorer") for r in rows} - {explorer, None})
+        foreign = sorted(
+            {str(r["explorer"]) for r in rows if r.get("explorer") not in (None, explorer)}
+        )
         if foreign:
             raise ResumeMismatch(
                 f"cannot resume {explorer}: {out_paths[k]} also holds rows from "
@@ -348,9 +363,38 @@ def _reconcile_resume_state(
             f"path do not match the run being resumed; rerun without --resume "
             f"to start these files over."
         )
-    resumed_ids: set[str] = set.intersection(
-        *({r["instance_id"] for r in rows if "instance_id" in r} for rows in existing.values())
-    )
+    return out_paths, existing
+
+
+def _check_resume_files(
+    output_jsonl: str, explorers: list[str], top_k_list: list[int]
+) -> None:
+    """Reject every explorer's unresumable output files before the run starts.
+
+    Reconciling lazily, as each explorer starts, would surface a later
+    explorer's bad layout only once the run reached it — hours of exploration
+    and API spend into a run whose only remedy is to start the files over.
+    """
+    for explorer in explorers:
+        _load_resume_state(output_jsonl, explorer, top_k_list)
+
+
+def _reconcile_resume_state(
+    output_jsonl: str, explorer: str, top_k_list: list[int]
+) -> tuple[set[str], dict[int, list[dict]]]:
+    """Prune an explorer's result files to the cases finished at every budget.
+
+    Results for one case are written to one file per top_k budget in sequence,
+    so an interrupt in that gap can leave the case in some files but not
+    others. Only cases present in ALL of them count as resumed; the rest are
+    dropped from disk here, so re-running them replaces their rows instead of
+    appending a second set and scoring the case twice. Each existing file is
+    rewritten whole, which also repairs a line left half-written by a hard kill.
+
+    Returns the resumed instance_ids and the surviving rows per top_k.
+    """
+    out_paths, existing = _load_resume_state(output_jsonl, explorer, top_k_list)
+    resumed_ids = set.intersection(*(_case_ids(rows) for rows in existing.values()))
     kept_per_k: dict[int, list[dict]] = {}
     for k, path in out_paths.items():
         kept_per_k[k] = _dedupe_rows(existing[k], resumed_ids)
@@ -950,6 +994,7 @@ def run(
         if resume:
             with _resume_mismatch_exits():
                 _check_resume_outputs(output_jsonl, explorer_names, top_k_list)
+                _check_resume_files(output_jsonl, explorer_names, top_k_list)
         else:
             _clear_outputs(output_jsonl, explorer_names, top_k_list)
     total_records = len(records)
@@ -1058,14 +1103,22 @@ def run(
         # without {k} points several budgets at one file, so they share a
         # single handle rather than overwriting each other.
         out_files: dict[int, object] = {}
+        out_handles = contextlib.ExitStack()
         if output_jsonl:
-            by_path: dict[Path, object] = {}
-            for k in top_k_list:
-                out_path = _format_output_path(output_jsonl, name, k)
-                if out_path not in by_path:
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    by_path[out_path] = out_path.open("a", encoding="utf-8")
-                out_files[k] = by_path[out_path]
+            # Opening is staged: a budget file that cannot be opened (no
+            # permission, no space) closes the handles already opened for the
+            # earlier budgets instead of leaking them.
+            with contextlib.ExitStack() as opening:
+                by_path: dict[Path, object] = {}
+                for k in top_k_list:
+                    out_path = _format_output_path(output_jsonl, name, k)
+                    if out_path not in by_path:
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        by_path[out_path] = opening.enter_context(
+                            out_path.open("a", encoding="utf-8")
+                        )
+                    out_files[k] = by_path[out_path]
+                out_handles = opening.pop_all()
 
         def _record_result(
             iid: str,
@@ -1204,8 +1257,7 @@ def run(
             interrupted = True
         finally:
             # Close output files (budgets may share one handle)
-            for fh in set(out_files.values()):
-                fh.close()
+            out_handles.close()
 
         if interrupted:
             print(file=sys.stderr)

@@ -349,3 +349,101 @@ def test_interrupted_fresh_run_does_not_leave_a_later_explorer_resumable(tmp_pat
     clean = tmp_path / "clean"
     assert _run(new_bench, clean, explorers=both, top_k="1").exit_code == 0
     assert _rows(out / "oracle" / "top1.jsonl") == _rows(clean / "oracle" / "top1.jsonl")
+
+
+def test_resume_refuses_a_later_explorers_layout_before_any_explorer_runs(tmp_path):
+    """A second explorer's unresumable files must not surface mid-run.
+
+    Checked lazily, the refusal lands only once the loop reaches that explorer
+    — after the earlier ones have been re-run, and with no remedy but to start
+    every file over.
+    """
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    both = ("oracle", "random")
+    assert _run(bench, out, explorers=both).exit_code == 0
+    before = {k: _rows(out / "oracle" / f"top{k}.jsonl") for k in (1, 2)}
+    # random's top2 budget file is gone: its --top-k set no longer matches.
+    (out / "random" / "top2.jsonl").unlink()
+
+    result = _run(bench, out, "--resume", explorers=both)
+
+    assert result.exit_code == 1
+    assert "cannot resume random" in _flat(result.stdout)
+    assert "▶ oracle" not in _flat(result.stdout)  # never started
+    assert {k: _rows(out / "oracle" / f"top{k}.jsonl") for k in (1, 2)} == before
+
+
+def test_reconcile_writes_through_a_symlinked_result_file(tmp_path):
+    """An output file symlinked to shared storage must stay a symlink."""
+    done = {"instance_id": "case-1", "metrics": {"recall": 1.0}}
+    torn = {"instance_id": "case-2", "metrics": {"recall": 0.5}}
+    template = _seed_results(tmp_path, {1: [done, torn], 2: [done]})
+    link = tmp_path / "oracle" / "top1.jsonl"
+    real = tmp_path / "shared" / "top1.jsonl"
+    real.parent.mkdir()
+    link.replace(real)
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not available on this platform")
+
+    eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+
+    assert link.is_symlink()
+    assert _rows(real) == [done]
+
+
+def test_resume_refuses_a_file_whose_explorer_field_is_not_a_name(tmp_path):
+    """A corrupt explorer field is a refusal, not a TypeError mid-comparison."""
+    rows = [{"instance_id": "case-1", "explorer": 7, "metrics": {}}]
+    template = _seed_results(tmp_path, {1: rows, 2: rows})
+
+    with pytest.raises(eval_runner.ResumeMismatch, match="also holds rows from 7"):
+        eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+
+
+def test_reconcile_ignores_rows_that_identify_no_case(tmp_path):
+    """An empty instance_id would otherwise skip every bench case missing one."""
+    done = {"instance_id": "case-1", "metrics": {}}
+    blank = {"instance_id": "", "metrics": {}}
+    null = {"instance_id": None, "metrics": {}}
+    template = _seed_results(tmp_path, {1: [done, blank, null], 2: [done, blank, null]})
+
+    resumed_ids, kept = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+
+    assert resumed_ids == {"case-1"}
+    assert kept == {1: [done], 2: [done]}
+
+
+def test_loader_reads_a_file_left_by_a_pre_utf8_run(tmp_path):
+    """Rows a Windows run wrote as cp1252 must not abort the resume."""
+    path = tmp_path / "top1.jsonl"
+    row = {"instance_id": "case-1", "regions": [{"path": "src/café.py"}]}
+    path.write_bytes(json.dumps(row, ensure_ascii=False).encode("cp1252") + b"\n")
+
+    loaded = eval_runner._load_existing_results(path)
+
+    assert [r["instance_id"] for r in loaded] == ["case-1"]
+
+
+def test_output_files_are_closed_when_a_later_one_cannot_be_opened(tmp_path, monkeypatch):
+    """A budget file that fails to open must not leak the earlier handles."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    appended: list = []
+    real_open = Path.open
+
+    def open_second_append_fails(self, mode="r", *args, **kwargs):
+        if mode != "a":
+            return real_open(self, mode, *args, **kwargs)
+        if appended:
+            raise OSError("no space left on device")
+        fh = real_open(self, mode, *args, **kwargs)
+        appended.append(fh)
+        return fh
+
+    monkeypatch.setattr(Path, "open", open_second_append_fails)
+    result = _run(bench, tmp_path / "out")
+
+    assert result.exit_code != 0
+    assert appended and all(fh.closed for fh in appended)
