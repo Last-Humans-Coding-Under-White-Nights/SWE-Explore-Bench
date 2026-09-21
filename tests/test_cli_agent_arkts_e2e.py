@@ -102,15 +102,18 @@ def as_dict(value: object) -> dict:
 def call_key(event: dict, part: dict, position: int) -> str:
     """Identity of one tool call across its streamed events.
 
-    OpenCode puts ``callID`` and ``messageID`` inside ``part``; a call id may
-    repeat across messages, so the pair is the key. The event id (inside the
-    part or, in other stream shapes, on the event) comes next. Both CLIs
-    always emit one of them; an event with neither counts as its own call.
+    Prefer the part id, scoped to its message: parallel OpenCode calls can
+    share both ``messageID`` and ``callID``. Without a part id, fall back to
+    the message/call pair, then the event id. An event with no identifiers
+    counts as its own call.
     """
-    ids = {**event, **part}
-    if ids.get("callID"):
-        return f"{ids.get('messageID') or ''}/{ids['callID']}"
-    return str(ids.get("id") or f"event-{position}")
+    message_id = part.get("messageID") or event.get("messageID") or ""
+    if part.get("id"):
+        return f"{message_id}/{part['id']}"
+    call_id = part.get("callID") or event.get("callID")
+    if call_id:
+        return f"{message_id}/{call_id}"
+    return str(event.get("id") or f"event-{position}")
 
 
 @pytest.fixture
@@ -204,6 +207,33 @@ class McpOutcomes:
     navigation_ok: int
     navigation_failed: int
     administrative: int
+
+
+def test_mcp_outcomes_keeps_parallel_calls_and_deduplicates_updates():
+    recorder = RecordingRun()
+    recorder.tool_events = [
+        {
+            "type": "tool_use",
+            "part": {
+                "id": part_id,
+                "messageID": "msg_001",
+                "callID": "call_001",
+                "tool": tool,
+                "state": {"status": status},
+            },
+        }
+        for part_id, tool, status in [
+            ("prt_006", "serena_find_symbol", "running"),
+            ("prt_003", "serena_search_for_pattern", "running"),
+            ("prt_006", "serena_find_symbol", "completed"),
+            ("prt_003", "serena_search_for_pattern", "error"),
+            ("prt_007", "serena_activate_project", "completed"),
+        ]
+    ]
+
+    assert recorder.mcp_outcomes() == McpOutcomes(
+        navigation_ok=1, navigation_failed=1, administrative=1,
+    )
 
 
 @dataclass
