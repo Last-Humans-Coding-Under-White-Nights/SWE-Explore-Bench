@@ -235,7 +235,12 @@ def test_extract_usage_from_jsonl_empty():
 
 
 def test_token_usage_roundtrip_and_add():
-    a = TokenUsage(input_tokens=10, output_tokens=2, reasoning_tokens=3, subagent_tokens=4)
+    a = TokenUsage(
+        input_tokens=10,
+        output_tokens=2,
+        reasoning_tokens=3,
+        subagent=TokenUsage(input_tokens=4, output_tokens=1),
+    )
     assert a.total == 12
     assert TokenUsage(cache_read_tokens=99, cache_write_tokens=99).total == 0
     b = TokenUsage.from_dict(a.to_dict())
@@ -325,8 +330,17 @@ def test_opencode_usage_includes_subagent_sessions(monkeypatch):
         separate_reasoning_tokens=33,
         cache_read_tokens=44,
         cache_write_tokens=55,
-        subagent_tokens=60,
+        subagent=TokenUsage(
+            input_tokens=10,
+            output_tokens=20,
+            reasoning_tokens=30,
+            separate_reasoning_tokens=30,
+            cache_read_tokens=40,
+            cache_write_tokens=50,
+        ),
     )
+    assert usage.subagent.total == 60
+    assert usage.total == 11 + 22 + 33
 
 
 @pytest.mark.parametrize(
@@ -385,3 +399,25 @@ def test_deveco_usage_falls_back_without_a_session_query(monkeypatch):
     usage = DevEcoExplorer(repo_root=Path("."))._collect_usage(json.dumps(step), env={})
 
     assert usage == TokenUsage(input_tokens=10, output_tokens=5)
+
+
+def test_subagent_breakdown_roundtrips_and_merges():
+    a = TokenUsage(input_tokens=10, output_tokens=5,
+                   subagent=TokenUsage(input_tokens=4, output_tokens=1))
+    b = TokenUsage(input_tokens=2, output_tokens=2,
+                   subagent=TokenUsage(input_tokens=1, output_tokens=1))
+
+    assert TokenUsage.from_dict(a.to_dict()) == a
+    assert a.to_dict()["subagent_total"] == 5
+
+    a.add(b)
+    assert a.subagent == TokenUsage(input_tokens=5, output_tokens=2)
+    assert a.total == 19
+    assert a.subagent.total == 7
+
+
+def test_add_keeps_subagent_none_when_neither_side_has_one():
+    a = TokenUsage(input_tokens=1)
+    a.add(TokenUsage(input_tokens=2))
+    assert a.subagent is None
+    assert TokenUsage.from_dict(a.to_dict()).subagent is None

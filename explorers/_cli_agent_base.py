@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, List
 
@@ -173,7 +173,7 @@ class BaseCliAgentExplorer(Explorer):
                     separate_reasoning_tokens=reasoning if separate_reasoning else 0,
                 )
                 if row.get("sub"):
-                    part.subagent_tokens = part.total
+                    part.subagent = replace(part)
                 usage.add(part)
         except (OSError, subprocess.TimeoutExpired, ValueError, TypeError,
                 AttributeError) as exc:

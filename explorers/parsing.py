@@ -602,7 +602,8 @@ class TokenUsage:
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     separate_reasoning_tokens: int = 0
-    subagent_tokens: int = 0
+    # A slice of the fields above, not an extra bucket: stays out of _CATEGORIES.
+    subagent: "TokenUsage | None" = None
 
     _CATEGORIES = (
         "input_tokens",
@@ -611,7 +612,6 @@ class TokenUsage:
         "cache_write_tokens",
         "reasoning_tokens",
         "separate_reasoning_tokens",
-        "subagent_tokens",
     )
 
     def add(self, other: "TokenUsage | None") -> None:
@@ -619,6 +619,10 @@ class TokenUsage:
             return
         for cat in self._CATEGORIES:
             setattr(self, cat, getattr(self, cat) + getattr(other, cat))
+        if other.subagent:
+            if self.subagent is None:
+                self.subagent = TokenUsage()
+            self.subagent.add(other.subagent)
 
     def has_any(self) -> bool:
         return any(getattr(self, cat) for cat in self._CATEGORIES)
@@ -628,7 +632,7 @@ class TokenUsage:
         """input + output (+ reasoning only when reported separately)."""
         return self.input_tokens + self.output_tokens + self.separate_reasoning_tokens
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "input": self.input_tokens,
             "output": self.output_tokens,
@@ -637,7 +641,8 @@ class TokenUsage:
             "reasoning": self.reasoning_tokens,
             "total": self.total,
             "separate_reasoning": self.separate_reasoning_tokens,
-            "subagent_total": self.subagent_tokens,
+            "subagent": self.subagent.to_dict() if self.subagent else None,
+            "subagent_total": self.subagent.total if self.subagent else 0,
         }
 
     @classmethod
@@ -655,7 +660,7 @@ class TokenUsage:
             cache_write_tokens=int(data.get("cache_write") or 0),
             reasoning_tokens=int(data.get("reasoning") or 0),
             separate_reasoning_tokens=separate,
-            subagent_tokens=int(data.get("subagent_total") or 0),
+            subagent=cls.from_dict(data.get("subagent")),
         )
 
 
