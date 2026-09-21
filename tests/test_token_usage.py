@@ -347,7 +347,7 @@ def test_opencode_usage_query_runs_in_the_isolated_home(monkeypatch):
 
     _collect_with_db(monkeypatch, json.dumps([dict(zip(cols, (1, 2, 0, 0, 0)), sub=0)]), seen=seen)
 
-    assert seen["cmd"][:2] == ["oc-test", "db"]
+    assert seen["cmd"][:3] == ["oc-test", "db", "--pure"]
     assert seen["cmd"][-2:] == ["--format", "json"]
     assert seen["env"] == {"HOME": "/tmp/isolated-home"}
 
@@ -359,6 +359,18 @@ def test_opencode_isolation_drops_inherited_db_override():
 
     assert "OPENCODE_DB" not in env
     assert env["HOME"] == str(Path("/tmp/home"))
+
+
+def test_opencode_usage_keeps_reasoning_inside_output(monkeypatch):
+    step = {"usage": {"completion_tokens": 20, "completion_tokens_details": {"reasoning_tokens": 5}}}
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+    rows = [dict(zip(cols, (100, 200, 50, 0, 0)), sub=0)]
+
+    usage = _collect_with_db(monkeypatch, json.dumps(rows), json.dumps(step))
+
+    assert usage.separate_reasoning_tokens == 0
+    assert usage.reasoning_tokens == 50
+    assert usage.total == 300
 
 
 def test_deveco_usage_falls_back_without_a_session_query(monkeypatch):

@@ -142,9 +142,17 @@ class BaseCliAgentExplorer(Explorer):
         stream = extract_usage_from_jsonl(stdout_text)
         if not self.session_usage_query:
             return stream
+        # The session columns are flat; only the stdout events show whether
+        # reasoning sits beside output or inside it.
+        separate_reasoning = not (
+            stream and stream.reasoning_tokens and not stream.separate_reasoning_tokens
+        )
+        usage = None
         try:
             proc = subprocess.run(
-                [self.bin_path, "db", self.session_usage_query, "--format", "json"],
+                # --pure: plugin chatter on stdout would break the JSON parse.
+                [self.bin_path, "db", "--pure", self.session_usage_query,
+                 "--format", "json"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -155,24 +163,27 @@ class BaseCliAgentExplorer(Explorer):
             )
             usage = TokenUsage()
             for row in json.loads(proc.stdout):
+                reasoning = int(row.get("reasoning") or 0)
                 part = TokenUsage(
-                    input_tokens=row["input"],
-                    output_tokens=row["output"],
-                    cache_read_tokens=row["cache_read"],
-                    cache_write_tokens=row["cache_write"],
-                    reasoning_tokens=row["reasoning"],
-                    # Reasoning is reported beside output, not inside it.
-                    separate_reasoning_tokens=row["reasoning"],
+                    input_tokens=int(row.get("input") or 0),
+                    output_tokens=int(row.get("output") or 0),
+                    cache_read_tokens=int(row.get("cache_read") or 0),
+                    cache_write_tokens=int(row.get("cache_write") or 0),
+                    reasoning_tokens=reasoning,
+                    separate_reasoning_tokens=reasoning if separate_reasoning else 0,
                 )
-                if row["sub"]:
+                if row.get("sub"):
                     part.subagent_tokens = part.total
                 usage.add(part)
-        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, KeyError):
-            usage = None
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError,
+                AttributeError) as exc:
+            usage, reason = None, f"{type(exc).__name__}: {exc}"
+        else:
+            reason = f"rc={proc.returncode} stderr={(proc.stderr or '')[-300:]!r}"
         if usage is None or not usage.has_any():
             _log(
-                f"{self.cli_display_name}: session store unreadable, "
-                "token usage excludes sub-agents if there were any",
+                f"{self.cli_display_name}: no session-store usage ({reason}); "
+                "falling back to the stdout count, which excludes sub-agents",
                 level="info",
             )
             return stream
