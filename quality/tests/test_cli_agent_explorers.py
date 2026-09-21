@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -276,11 +277,11 @@ class DevEcoInvocationTest(unittest.TestCase):
         self.assertNotIn("-p", cmd)
         self.assertNotIn("--password", cmd)
 
-    def test_auto_flag_is_always_sent(self) -> None:
+    def test_auto_flag_respects_skip_permissions(self) -> None:
         """deveco 0.1.12 resolves ``ask`` rules with ``--auto`` and ignores the
         skip flag below; 0.1.9 ignores unknown flags, so both are sent."""
         self.assertIn("--auto", self._cmd_for())
-        self.assertIn("--auto", self._cmd_for(skip_permissions=False))
+        self.assertNotIn("--auto", self._cmd_for(skip_permissions=False))
 
     def test_skip_permissions_can_be_disabled(self) -> None:
         self.assertIn("--dangerously-skip-permissions", self._cmd_for())
@@ -355,6 +356,65 @@ class CheckoutSeedingTest(unittest.TestCase):
             ".serena/project.yml": "b\n",
             ".serena/cache/index": "",
         })
+
+    def test_deleted_seed_directory_does_not_mask_success_or_timeout(self) -> None:
+        _write(self.cfg, "checkout/.serena/project.yml", "a")
+        self._run(lambda: shutil.rmtree(self.repo / ".serena"))
+
+        def timeout() -> None:
+            shutil.rmtree(self.repo / ".serena")
+            raise subprocess.TimeoutExpired("x", 1)
+
+        with self.assertRaisesRegex(RuntimeError, "timed out"):
+            self._run(timeout)
+
+    def test_preexisting_empty_directory_survives_cleanup(self) -> None:
+        (self.repo / ".serena").mkdir()
+        _write(self.cfg, "checkout/.serena/nested/project.yml", "a")
+        self._run()
+        self.assertTrue((self.repo / ".serena").is_dir())
+        self.assertEqual(list((self.repo / ".serena").iterdir()), [])
+
+    def test_broken_symlink_is_left_untouched(self) -> None:
+        target = self.repo / "link"
+        try:
+            target.symlink_to(self.repo / "missing")
+        except OSError as exc:
+            self.skipTest(f"symlinks unavailable: {exc}")
+        _write(self.cfg, "checkout/link", "a")
+        self._run()
+        self.assertTrue(target.is_symlink())
+        self.assertFalse((self.repo / "missing").exists())
+
+    def test_failed_seeding_rolls_back_files_and_directories(self) -> None:
+        _write(self.cfg, "checkout/a/first", "a")
+        _write(self.cfg, "checkout/b/second", "b")
+        original = Path.read_bytes
+
+        def read(path):
+            if path == self.cfg / "checkout/b/second":
+                raise FileNotFoundError("seed source disappeared")
+            return original(path)
+
+        with patch.object(Path, "read_bytes", read):
+            with self.assertRaisesRegex(FileNotFoundError, "seed source disappeared"):
+                self._run()
+        self.assertEqual(sorted(p.name for p in self.repo.iterdir()), ["README.md"])
+
+    def test_write_failure_rolls_back_created_directories(self) -> None:
+        _write(self.cfg, "checkout/a/first", "a")
+        _write(self.cfg, "checkout/b/second", "b")
+        original = Path.open
+
+        def open_file(path, *args, **kwargs):
+            if path == self.repo / "b/second":
+                raise PermissionError("seed write denied")
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "open", open_file):
+            with self.assertRaisesRegex(PermissionError, "seed write denied"):
+                self._run()
+        self.assertEqual(sorted(p.name for p in self.repo.iterdir()), ["README.md"])
 
     def test_no_checkout_dir_means_no_seeding(self) -> None:
         self.assertEqual(self._run(), {"README.md": "original"})

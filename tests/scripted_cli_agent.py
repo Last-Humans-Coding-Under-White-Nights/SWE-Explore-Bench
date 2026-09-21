@@ -107,7 +107,10 @@ def parse_args(argv: list[str]) -> Path:
 def read_issue(prompt: str) -> str:
     if "RELEVANT_FILES:" not in prompt or ISSUE_HEADER not in prompt:
         fail("prompt does not follow the explorer contract", 2)
-    return prompt.split(ISSUE_HEADER, 1)[1].split(ISSUE_TRAILER, 1)[0]
+    issue, trailer, _ = prompt.split(ISSUE_HEADER, 1)[1].partition(ISSUE_TRAILER)
+    if not trailer:
+        fail("prompt does not follow the explorer contract", 2)
+    return issue
 
 
 def load_profile() -> dict:
@@ -259,9 +262,10 @@ def nominal_usage(visited: dict[Path, list[str]]) -> dict[str, int]:
 
 
 def main() -> None:
+    # Configure before argument parsing, which can also emit Unicode errors.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8")
     repo = parse_args(sys.argv[1:])
-    # The explorer sends UTF-8; the locale codec on Windows is not.
-    sys.stdin.reconfigure(encoding="utf-8")
     issue = read_issue(sys.stdin.read())
     tools = Tools(repo, load_profile())
 

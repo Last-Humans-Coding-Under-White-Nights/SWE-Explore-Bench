@@ -75,7 +75,19 @@ def leaves(node, path=()):
 def test_profile_carries_no_literal_credentials(cli, variant):
     for key_path, value in leaves(load(cli, variant)):
         words = {w.lower() for key in key_path for w in KEY_WORDS.findall(str(key))}
-        if words & SECRET_WORDS:
+        # Numeric token budgets are settings; authentication fields must still
+        # use env references, even when nested under a limits section.
+        leaf_words = {w.lower() for w in KEY_WORDS.findall(str(key_path[-1]))}
+        token_budget = (
+            words & SECRET_WORDS <= {"token", "tokens"}
+            and leaf_words in (
+                {"max", "tokens"}, {"input", "tokens"}, {"output", "tokens"},
+                {"reserved", "tokens"}, {"token", "limit"}, {"token", "count"},
+                {"num", "tokens"},
+            )
+            and isinstance(value, int) and not isinstance(value, bool)
+        )
+        if words & SECRET_WORDS and not token_budget:
             location = "/".join(map(str, key_path))
             assert isinstance(value, str) and ENV_REF.match(value), (
                 f"{location} must be an {{env:VAR}} reference, got {value!r}"
@@ -144,7 +156,8 @@ def test_serena_runs_headless(cli, variant):
     browser tab and a log window on every launch."""
     command = load(cli, variant)["mcp"]["serena"]["command"]
     for flag in ("--enable-web-dashboard", "--enable-gui-log-window"):
-        assert command[command.index(flag) + 1] == "false", flag
+        assert flag in command, f"{flag} missing from serena command"
+        assert command[command.index(flag) + 1:command.index(flag) + 2] == ["false"], flag
 
 
 @pytest.mark.parametrize("cli,variant", PROFILES)

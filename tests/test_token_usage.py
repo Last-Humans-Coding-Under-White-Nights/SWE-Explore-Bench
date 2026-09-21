@@ -282,3 +282,13 @@ def test_report_usage_collector_accumulates_per_thread():
     assert all(t.output_tokens == 1 for t in trackers)
 
     report_usage(TokenUsage(input_tokens=999))
+
+
+def test_extract_usage_from_array_event_lines():
+    usage = extract_usage_from_jsonl(
+        '[{"usage": {"input_tokens": 12, "output_tokens": 3}}, '
+        '{"usage": {"input_tokens": 7, "output_tokens": 2}}]'
+    )
+    assert usage is not None
+    assert usage.input_tokens == 19
+    assert usage.output_tokens == 5

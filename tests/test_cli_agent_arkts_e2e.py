@@ -87,7 +87,8 @@ def overlaps(region: Region, want: Region) -> bool:
     path, start, end = region
     if end == WHOLE_FILE:
         end = float("inf")
-    return path == want[0] and max(start, want[1]) <= min(end, want[2])
+    want_end = float("inf") if want[2] == WHOLE_FILE else want[2]
+    return path == want[0] and max(start, want[1]) <= min(end, want_end)
 
 
 def expected_regions(case: dict) -> list[Region]:
@@ -125,7 +126,8 @@ def arkts_repo(tmp_path: Path) -> Path:
 def serena_home(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """One Serena home for the whole session, so the language server is
     installed once rather than once per smoke run."""
-    return Path(os.environ.get(SERENA_HOME_VAR) or tmp_path_factory.mktemp("serena-home"))
+    value = os.environ.get(SERENA_HOME_VAR)
+    return Path(value).expanduser() if value else tmp_path_factory.mktemp("serena-home")
 
 
 @pytest.fixture
@@ -345,9 +347,9 @@ def test_real_cli_localizes_arkts_bug(
     run = run_case(explorer, case, monkeypatch)
 
     assert tree_digest(arkts_repo) == before, "the agent modified the repository"
-    want = expected_regions(case)[0]
-    hits = [region for region in run.regions if overlaps(region, want)]
-    assert hits, f"no returned region in {run.regions} overlaps {want}"
+    expected = expected_regions(case)
+    hits = [region for region in run.regions if any(overlaps(region, want) for want in expected)]
+    assert hits, f"no returned region in {run.regions} overlaps {expected}"
 
     tools = run.recorder.tool_names()
     mcp = run.recorder.mcp_outcomes()
@@ -360,12 +362,48 @@ def test_real_cli_localizes_arkts_bug(
         assert mcp == McpOutcomes(0, 0, 0), f"MCP is disabled but Serena was called: {mcp}"
 
     best = hits[0]
+    width = "all" if best[2] == WHOLE_FILE else best[2] - best[1] + 1
     with capsys.disabled():
         print(
             f"\n[cli-smoke] cli={spec.name} variant={variant} case={case['instance_id']} "
-            f"exact={best == want} width={best[2] - best[1] + 1} "
+            f"exact={best in expected} width={width} "
             f"rank={run.regions.index(best) + 1} regions={len(run.regions)} "
             f"tool_calls={len(tools)} mcp_nav_ok={mcp.navigation_ok} "
             f"mcp_nav_failed={mcp.navigation_failed} mcp_admin={mcp.administrative} "
             f"tokens={run.tokens}"
         )
+
+
+@pytest.mark.parametrize("prompt", [
+    "RELEVANT_FILES: ISSUE DESCRIPTION FROM USER (very important): issue",
+    "Do exactly this, but without modifications. RELEVANT_FILES: "
+    "ISSUE DESCRIPTION FROM USER (very important): issue",
+])
+def test_scripted_agent_rejects_missing_or_misplaced_trailer(prompt, tmp_path):
+    completed = _REAL_RUN(
+        [sys.executable, str(SCRIPTED_AGENT), "run", "--format", "json", "--dir", str(tmp_path)],
+        input=prompt, capture_output=True, text=True, encoding="utf-8",
+    )
+    assert completed.returncode == 2
+    assert "prompt does not follow the explorer contract" in completed.stderr
+
+
+def test_scripted_agent_reports_unicode_errors_under_ascii_locale():
+    completed = _REAL_RUN(
+        [sys.executable, str(SCRIPTED_AGENT), "标题"],
+        env={**os.environ, "PYTHONIOENCODING": "ascii"},
+        capture_output=True, text=True, encoding="utf-8",
+    )
+    assert completed.returncode == 2
+    assert "标题" in completed.stderr
+    assert "UnicodeEncodeError" not in completed.stderr
+
+
+@pytest.mark.parametrize("region,want,expected", [
+    ((PAGE, 10, 12), (PAGE, 1, WHOLE_FILE), True),
+    ((PAGE, 1, WHOLE_FILE), (PAGE, 10, 12), True),
+    ((PAGE, 1, 9), (PAGE, 10, 12), False),
+    ((PAGE, 10, 12), (IMPORTED_MODULE, 1, WHOLE_FILE), False),
+])
+def test_overlap_handles_whole_files(region, want, expected):
+    assert overlaps(region, want) is expected

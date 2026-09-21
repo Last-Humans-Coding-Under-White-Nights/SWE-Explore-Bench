@@ -291,6 +291,11 @@ class IterEventsTest(unittest.TestCase):
             [{"type": "text", "part": {"text": "hi"}}, {"type": "step_finish"}],
         )
 
+    def test_bom_and_array_events_are_retained(self):
+        raw = '\ufeff {"type": "step_start"}\n[{"type": "text"}, 1, null]'
+        self.assertEqual(list(iter_events(raw)),
+                         [{"type": "step_start"}, {"type": "text"}])
+
     def test_empty_and_none_input_yield_nothing(self):
         self.assertEqual(list(iter_events("")), [])
         self.assertEqual(list(iter_events(None)), [])

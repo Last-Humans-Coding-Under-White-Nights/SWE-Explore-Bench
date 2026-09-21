@@ -40,7 +40,8 @@ class DevEcoExplorer(BaseCliAgentExplorer):
 
     bin_path: str = "deveco"
     #: DevEco Code 0.1.9 resolved approval prompts with this flag; 0.1.12
-    #: ignores it and uses OpenCode's ``--auto`` instead, which is always sent.
+    #: ignores it and uses OpenCode's ``--auto`` instead. Both flags follow
+    #: ``skip_permissions``.
     skip_permissions: bool = True
 
     cli_display_name: ClassVar[str] = "deveco CLI"
@@ -60,12 +61,12 @@ class DevEcoExplorer(BaseCliAgentExplorer):
         cmd = [
             self.bin_path,
             "run",
-            "--auto",
             "--format",
             "json",
             "--dir",
             str(self.repo_root.resolve()),
         ]
         if self.skip_permissions:
+            cmd.insert(2, "--auto")
             cmd.append("--dangerously-skip-permissions")
         return cmd

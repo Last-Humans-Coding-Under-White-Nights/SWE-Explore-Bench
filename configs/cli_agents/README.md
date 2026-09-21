@@ -39,7 +39,8 @@ Install with `npm install -g opencode-ai@1.18.29` or
 not covered by the smoke test below. The DevEco explorer sends both `--auto`
 (honoured by 0.1.12) and `--dangerously-skip-permissions` (honoured by
 0.1.9), so a rule left at `ask` in a private profile is resolved on either
-version. The committed profiles additionally leave nothing at `ask`.
+version. Set `--no-deveco-skip-permissions` to omit both flags.
+The committed profiles additionally leave nothing at `ask`.
 
 ## Model wiring
 
@@ -142,6 +143,7 @@ and keep the `arkts-no-mcp` variant as the control.
 ```bash
 export ACADEMIC_API_BASE=http://127.0.0.1:4000/v1
 export ACADEMIC_API_KEY=...
+export SWE_EXPLORE_SERENA_HOME=~/.cache/swe-explore-serena
 
 uv run python eval_runner.py \
   --bench bench.arkts.jsonl --repos repos \
