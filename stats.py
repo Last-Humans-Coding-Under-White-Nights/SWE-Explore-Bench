@@ -27,7 +27,7 @@ class Region:
 
 
 def _load_records(path: Path) -> Iterable[dict[str, Any]]:
-    with path.open("r") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -167,7 +167,7 @@ def summary(
                 repo: dict(files) for repo, files in repo_file_line_approx.items()
             },
         }
-        with dump_json.open("w") as f:
+        with dump_json.open("w", encoding="utf-8") as f:
             json.dump(stats_obj, f, ensure_ascii=False, indent=2)
         console.print(f"[green]统计结果已写入[/green] [bold]{dump_json}[/bold]")
 

@@ -43,7 +43,7 @@ def extract_repos_from_trajs(trajs_dir: Path) -> dict[str, set[str]]:
 
     for traj_file in trajs_dir.rglob("*.json"):
         try:
-            with open(traj_file) as f:
+            with open(traj_file, encoding="utf-8") as f:
                 data = json.load(f)
             # 兼容两种格式：统一轨迹格式 (info.instance_id/repo) 和 mini-swe-agent 格式 (顶层 instance_id)
             instance_id = data.get("info", {}).get("instance_id") or data.get(
@@ -160,7 +160,7 @@ def clone(
     """
     # 加载 commit map
     console.print(f"[cyan]Loading commit map from {commit_map_file}...[/cyan]")
-    with open(commit_map_file) as f:
+    with open(commit_map_file, encoding="utf-8") as f:
         commit_map: dict[str, str] = json.load(f)
     console.print(f"[green]Loaded {len(commit_map)} commit mappings[/green]")
 
@@ -274,13 +274,13 @@ def clone_bench(
 ):
     """从 bench JSONL 文件中读取 instance_id，通过 GitHub Archive API 下载到指定 commit。"""
     console.print(f"[cyan]Loading commit map from {commit_map_file}...[/cyan]")
-    with open(commit_map_file) as f:
+    with open(commit_map_file, encoding="utf-8") as f:
         commit_map: dict[str, str] = json.load(f)
     console.print(f"[green]Loaded {len(commit_map)} commit mappings[/green]")
 
     # 从 bench JSONL 读取所有 instance_id
     instance_ids: list[str] = []
-    with open(bench_file) as f:
+    with open(bench_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -383,7 +383,7 @@ def list_repos(
 
     commit_map: dict[str, str] = {}
     if commit_map_file and commit_map_file.exists():
-        with open(commit_map_file) as f:
+        with open(commit_map_file, encoding="utf-8") as f:
             commit_map = json.load(f)
 
     lines: list[str] = []
@@ -402,7 +402,7 @@ def list_repos(
                 # lines.append(f"{repo}\t{instance_id}")
 
     if output:
-        with open(output, "w") as f:
+        with open(output, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         console.print(f"[green]Written {len(lines)} repos to {output}[/green]")
     else:

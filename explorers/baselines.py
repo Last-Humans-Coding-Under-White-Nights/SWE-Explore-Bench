@@ -15,7 +15,7 @@ class OracleExplorer(Explorer):
 
     def __init__(self, bench_path: Path) -> None:
         self.bench_data: dict[str, list[dict]] = {}
-        with open(bench_path) as f:
+        with open(bench_path, encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 instance_id = data["instance_id"]
@@ -41,7 +41,7 @@ class RandomExplorer(Explorer):
     def __init__(self, bench_path: Path, seed: int = 42) -> None:
         self.all_regions: list[dict] = []
         self.rng = random.Random(seed)
-        with open(bench_path) as f:
+        with open(bench_path, encoding="utf-8") as f:
             for line in f:
                 data = json.loads(line)
                 gt = data.get("ground_truth") or {}

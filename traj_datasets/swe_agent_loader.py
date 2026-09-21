@@ -284,7 +284,7 @@ def load_swe_agent_dataset(
                 model_dir = output_path / model_name
                 model_dir.mkdir(parents=True, exist_ok=True)
                 output_file = model_dir / f"{instance_id}__{run_idx}.json"
-                with open(output_file, "w") as f:
+                with open(output_file, "w", encoding="utf-8") as f:
                     json.dump(
                         unified_traj.model_dump(), f, indent=2, ensure_ascii=False
                     )

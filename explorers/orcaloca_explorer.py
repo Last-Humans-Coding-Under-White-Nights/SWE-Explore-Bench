@@ -195,7 +195,7 @@ class OrcaLocaExplorer(Explorer):
             lines.append(f'OPENAI_API_KEY: "{_esc(self.api_key)}"')
         if self.api_base:
             lines.append(f'OPENAI_API_BASE_URL: "{_esc(self.api_base)}"')
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
     def _parse_raw_searcher(
@@ -205,7 +205,7 @@ class OrcaLocaExplorer(Explorer):
         from .base import ContextRegion
         from .parsing import _normalize_path, resolve_entity_lines
 
-        with open(searcher_path) as f:
+        with open(searcher_path, encoding="utf-8") as f:
             data = json.load(f)
 
         regions: list[ContextRegion] = []

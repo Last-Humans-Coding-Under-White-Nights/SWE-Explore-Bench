@@ -129,7 +129,7 @@ def collect_path_line_counts(repo_dir: Path, regions: list[Region], bench_gt: di
         if not file_path.is_file():
             continue
         try:
-            counts[path] = len(file_path.read_text(errors="replace").splitlines())
+            counts[path] = len(file_path.read_text(encoding="utf-8", errors="replace").splitlines())
         except OSError:
             continue
     return counts

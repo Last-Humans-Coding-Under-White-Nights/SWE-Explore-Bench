@@ -73,7 +73,7 @@ def _read_lines(file_path: Path, start: int, end: int) -> tuple[str, int]:
     end=-1 表示读到文件末尾；start<0 表示距末尾偏移。
     """
     try:
-        all_lines = file_path.read_text(errors="replace").splitlines(keepends=True)
+        all_lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except (OSError, UnicodeDecodeError):
         return "", 0
 
@@ -142,7 +142,7 @@ def build_contexts(
     problem_statements: dict[str, str] | None = None,
 ) -> int:
     """构建 contexts.jsonl，返回成功写入的条数。"""
-    with open(bench_path) as f:
+    with open(bench_path, encoding="utf-8") as f:
         bench_items = [json.loads(line) for line in f]
 
     bench_items = [b for b in bench_items if b["ground_truth"].get("read_core_regions")]
@@ -157,7 +157,7 @@ def build_contexts(
     skipped_no_repo = 0
     skipped_empty = 0
 
-    with open(output_path, "w") as out_f, Progress(
+    with open(output_path, "w", encoding="utf-8") as out_f, Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         BarColumn(),

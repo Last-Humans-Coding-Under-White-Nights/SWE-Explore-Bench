@@ -93,7 +93,7 @@ class CoSILExplorer(Explorer):
                 "problem_statement": query,
                 "patch": "",
             }
-            with open(dataset_file, "w") as f:
+            with open(dataset_file, "w", encoding="utf-8") as f:
                 f.write(json.dumps(instance_data) + "\n")
 
             # Create the API-patching wrapper script
@@ -184,7 +184,7 @@ class CoSILExplorer(Explorer):
 
         import tempfile as _tf
         gen_script_path = os.path.join(_tf.gettempdir(), f"gen_struct_{instance_id}.py")
-        with open(gen_script_path, "w") as f:
+        with open(gen_script_path, "w", encoding="utf-8") as f:
             f.write(f"""import sys, json, os
 sys.path.insert(0, "{self.cosil_path}")
 from get_repo_structure.get_repo_structure import create_structure
@@ -192,7 +192,7 @@ from get_repo_structure.get_repo_structure import create_structure
 structure = create_structure("{self.repo_root}")
 d = {{"repo": "{github_repo}", "base_commit": "HEAD", "structure": structure, "instance_id": "{instance_id}"}}
 os.makedirs("{struct_dir}", exist_ok=True)
-with open("{struct_file}", "w") as fout:
+with open("{struct_file}", "w", encoding="utf-8") as fout:
     json.dump(d, fout)
 print(f"Generated {struct_file}")
 """)
@@ -266,11 +266,11 @@ phase, remaining = parser.parse_known_args()
 
 if phase.phase == "file":
     sys.argv = ["AFL_localize_file.py"] + remaining
-    exec(open("afl/fl/AFL_localize_file.py").read())
+    exec(open("afl/fl/AFL_localize_file.py", encoding="utf-8").read())
 else:
     sys.argv = ["AFL_localize_func.py"] + remaining
-    exec(open("afl/fl/AFL_localize_func.py").read())
+    exec(open("afl/fl/AFL_localize_func.py", encoding="utf-8").read())
 '''
-        with open(wrapper_path, "w") as f:
+        with open(wrapper_path, "w", encoding="utf-8") as f:
             f.write(script)
         return wrapper_path

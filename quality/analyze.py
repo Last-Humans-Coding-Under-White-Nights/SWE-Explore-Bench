@@ -29,7 +29,7 @@ def _find_reports(report_dir: Path) -> dict[str, dict[str, Any]]:
     reports: dict[str, dict[str, Any]] = {}
     for f in sorted(report_dir.glob("*.json")):
         try:
-            data = json.loads(f.read_text())
+            data = json.loads(f.read_text(encoding="utf-8"))
             reports[f.stem] = data
         except (json.JSONDecodeError, OSError):
             continue
@@ -140,7 +140,7 @@ def compute_analysis(
     # contexts 统计
     if contexts_path and contexts_path.exists():
         ctx_meta: dict[str, dict] = {}
-        with open(contexts_path) as f:
+        with open(contexts_path, encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
                 ctx_meta[r["instance_id"]] = {
@@ -228,7 +228,7 @@ def main(
     analysis = compute_analysis(reports, contexts)
 
     output.parent.mkdir(parents=True, exist_ok=True)
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         json.dump(analysis, f, indent=2, ensure_ascii=False)
     console.log(f"Analysis written to {output}")
 

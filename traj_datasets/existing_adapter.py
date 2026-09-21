@@ -217,7 +217,7 @@ def convert_existing_trajectory(
         file_path = traj_data
         if not traj_data.exists():
             raise FileNotFoundError(f"Trajectory file not found: {traj_data}")
-        with open(traj_data) as f:
+        with open(traj_data, encoding="utf-8") as f:
             traj_data = json.load(f)
 
     # Validate basic structure
@@ -313,7 +313,7 @@ def convert_existing_trajectory_dir(
             output_file.parent.mkdir(parents=True, exist_ok=True)
 
             # Save converted trajectory
-            with open(output_file, "w") as f:
+            with open(output_file, "w", encoding="utf-8") as f:
                 json.dump(unified_traj.model_dump(), f, indent=2, ensure_ascii=False)
 
             trajectories.append(unified_traj)
@@ -364,7 +364,7 @@ def main(
 
         # Save to output file
         output_file = output or path.with_suffix(".unified.json")
-        with open(output_file, "w") as f:
+        with open(output_file, "w", encoding="utf-8") as f:
             json.dump(unified_traj.model_dump(), f, indent=2, ensure_ascii=False)
         console.print(f"\n[green]Saved to: {output_file}[/green]")
 

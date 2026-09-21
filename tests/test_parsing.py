@@ -21,7 +21,7 @@ class RelevantFilesTest(unittest.TestCase):
         for name in (self.page, 'Index.ets', 'src/B.ets'):
             file = self.root / name
             file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_text('// ArkTS source\n' * 30)
+            file.write_text('// ArkTS source\n' * 30, encoding="utf-8")
 
     def parse(
         self, location: str, structured: bool = True, *, top_k: int | None = None,

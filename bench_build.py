@@ -508,7 +508,7 @@ def load_trajectory_data(path: Path) -> dict[str, Any]:
     仅加载统一轨迹格式 (info + traj)。返回形态为 {"info": ..., "messages": traj} 供下游复用。
     无 traj 或解析失败时返回 messages=[]。
     """
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if "traj" not in data:
         logger.warning("Unified format requires 'traj' field: %s", path)
@@ -1121,7 +1121,7 @@ def build(
     ) as progress:
         task = progress.add_task("Building benchmark...", total=len(groups))
         written = 0
-        with open(output, "w") as f:
+        with open(output, "w", encoding="utf-8") as f:
             for instance_id, paths in tqdm(
                 groups.items(), desc="Building ground truth..."
             ):

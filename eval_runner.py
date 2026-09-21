@@ -98,7 +98,7 @@ ALL_EXPLORERS = LOCAL_EXPLORERS | AGENTIC_EXPLORERS | ACADEMIC_EXPLORERS
 
 def _load_bench_records(path: Path) -> list[dict]:
     records: list[dict] = []
-    with path.open("r") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -110,7 +110,7 @@ def _load_issue_map(trajs_dir: Path) -> dict[str, str]:
     issue_map: dict[str, str] = {}
     for p in trajs_dir.rglob("*.json"):
         try:
-            data = json.loads(p.read_text())
+            data = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
         info = data.get("info") or {}
@@ -179,7 +179,7 @@ def _build_file_line_counts(
             fpath = repo_dir / rel
             if fpath.is_file():
                 try:
-                    per[rel] = len(fpath.read_text(errors="ignore").splitlines())
+                    per[rel] = len(fpath.read_text(encoding="utf-8", errors="ignore").splitlines())
                 except OSError:
                     pass
         if per:
@@ -210,15 +210,199 @@ def _load_existing_results(path: Path) -> list[dict]:
     if not path.is_file():
         return []
     rows = []
-    with path.open() as f:
+    # A file written before results were UTF-8 everywhere (a Windows run wrote
+    # cp1252) or holding bytes from an agent CLI must not abort the resume:
+    # replace what cannot be decoded and let json.loads keep or skip the line.
+    with path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
             if line:
                 try:
-                    rows.append(json.loads(line))
+                    row = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                if isinstance(row, dict):
+                    rows.append(row)
     return rows
+
+
+def _dump_row(row: dict) -> str:
+    """Serialize one result row as a JSONL line."""
+    return json.dumps(row, ensure_ascii=False) + "\n"
+
+
+def _case_ids(rows: list[dict]) -> set[str]:
+    """The instance_ids in `rows`, skipping rows that identify no case.
+
+    A missing, null or empty id can be matched against no bench record and
+    re-run for none either, and an empty one would stand in for every bench
+    record that has no id of its own.
+    """
+    iids = (r.get("instance_id") for r in rows)
+    return {iid for iid in iids if isinstance(iid, str) and iid}
+
+
+def _dedupe_rows(rows: list[dict], keep: set[str]) -> list[dict]:
+    """One row per instance_id (the last one wins), restricted to `keep`."""
+    latest: dict[str, dict] = {}
+    for row in rows:
+        iid = row.get("instance_id")
+        if isinstance(iid, str) and iid in keep:
+            latest[iid] = row
+    return list(latest.values())
+
+
+def _rewrite_results(path: Path, rows: list[dict]) -> None:
+    """Replace a JSONL result file with `rows`, atomically.
+
+    Written through to the real file: an output path symlinked to shared
+    storage must keep pointing there, and the temporary file has to land on
+    the target's filesystem for the replace to be atomic.
+    """
+    target = path.resolve()
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.writelines(_dump_row(row) for row in rows)
+    tmp.replace(target)
+
+
+def _append_row(fh, row: dict) -> None:
+    """Append one result row to an already-open JSONL file and flush it."""
+    fh.write(_dump_row(row))
+    fh.flush()
+
+
+class ResumeMismatch(RuntimeError):
+    """The existing result files do not match the run being resumed."""
+
+
+def _clear_outputs(output_jsonl: str, explorers: list[str], top_k_list: list[int]) -> None:
+    """Empty every result file a fresh run will write, before it writes any.
+
+    Clearing them lazily, as each explorer starts, would let an interrupt leave
+    a later explorer's file holding a previous run's rows — which a subsequent
+    --resume would then adopt as this run's work.
+    """
+    for explorer in explorers:
+        for k in top_k_list:
+            path = _format_output_path(output_jsonl, explorer, k)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.open("w", encoding="utf-8").close()
+
+
+@contextlib.contextmanager
+def _resume_mismatch_exits():
+    """Report an unresumable output layout as a CLI error, not a traceback."""
+    try:
+        yield
+    except ResumeMismatch as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+
+def _check_resume_outputs(
+    output_jsonl: str, explorers: list[str], top_k_list: list[int]
+) -> None:
+    """Reject an --output template that gives one file to several budgets.
+
+    A result row records no top_k, and resume rewrites the files it prunes, so
+    two budgets (or two explorers) sharing a file would each load the other's
+    rows as their own and then delete them. Only a template that keeps them
+    apart can be resumed.
+    """
+    seen: dict[Path, tuple[str, int]] = {}
+    for explorer in explorers:
+        for k in top_k_list:
+            path = _format_output_path(output_jsonl, explorer, k)
+            if path in seen:
+                other_explorer, other_k = seen[path]
+                raise ResumeMismatch(
+                    f"cannot resume: --output {output_jsonl!r} writes both "
+                    f"({other_explorer}, top_k={other_k}) and ({explorer}, top_k={k}) "
+                    f"to {path}. Resuming needs one file per explorer and budget; "
+                    f"add {{explorer}}/{{k}} to --output, or rerun without --resume."
+                )
+            seen[path] = (explorer, k)
+
+
+def _load_resume_state(
+    output_jsonl: str, explorer: str, top_k_list: list[int]
+) -> tuple[dict[int, Path], dict[int, list[dict]]]:
+    """Read an explorer's result files, rejecting a layout it cannot prune.
+
+    Callers validate the output template with `_check_resume_outputs` first, so
+    every budget here has a file of its own. Reads nothing back into the run:
+    this only decides whether the files on disk belong to the run being
+    resumed, so it is safe to call for every explorer before any of them runs.
+    """
+    out_paths = {k: _format_output_path(output_jsonl, explorer, k) for k in top_k_list}
+    existing = {k: _load_existing_results(path) for k, path in out_paths.items()}
+    # Rows record the explorer that produced them. A file holding another
+    # explorer's rows — an earlier run with a different --explorers set and no
+    # {explorer} in --output — cannot be pruned as this one's: those rows would
+    # be scored as ours and then rewritten away. A row with no explorer
+    # recorded predates the field and is taken as ours.
+    for k, rows in existing.items():
+        foreign = sorted(
+            {str(r["explorer"]) for r in rows if r.get("explorer") not in (None, explorer)}
+        )
+        if foreign:
+            raise ResumeMismatch(
+                f"cannot resume {explorer}: {out_paths[k]} also holds rows from "
+                f"{', '.join(foreign)}. Resuming needs one file per explorer; add "
+                f"{{explorer}} to --output, or rerun without --resume."
+            )
+    # A budget with no file at all has finished no cases, so pruning against it
+    # would discard every row the other budgets hold. That means the --top-k
+    # set or the --output path changed, not that a write was interrupted.
+    # Existing empty files are valid: a kill during the first case can leave
+    # later budgets empty. Resume must rerun that incomplete case.
+    missing = [path for path in out_paths.values() if not path.is_file()]
+    if missing and any(existing.values()):
+        raise ResumeMismatch(
+            f"cannot resume {explorer}: no results at {missing[0]}, but other "
+            f"top_k files already hold rows. The --top-k budgets or --output "
+            f"path do not match the run being resumed; rerun without --resume "
+            f"to start these files over."
+        )
+    return out_paths, existing
+
+
+def _check_resume_files(
+    output_jsonl: str, explorers: list[str], top_k_list: list[int]
+) -> None:
+    """Reject every explorer's unresumable output files before the run starts.
+
+    Reconciling lazily, as each explorer starts, would surface a later
+    explorer's bad layout only once the run reached it — hours of exploration
+    and API spend into a run whose only remedy is to start the files over.
+    """
+    for explorer in explorers:
+        _load_resume_state(output_jsonl, explorer, top_k_list)
+
+
+def _reconcile_resume_state(
+    output_jsonl: str, explorer: str, top_k_list: list[int]
+) -> tuple[set[str], dict[int, list[dict]]]:
+    """Prune an explorer's result files to the cases finished at every budget.
+
+    Results for one case are written to one file per top_k budget in sequence,
+    so an interrupt in that gap can leave the case in some files but not
+    others. Only cases present in ALL of them count as resumed; the rest are
+    dropped from disk here, so re-running them replaces their rows instead of
+    appending a second set and scoring the case twice. Each existing file is
+    rewritten whole, which also repairs a line left half-written by a hard kill.
+
+    Returns the resumed instance_ids and the surviving rows per top_k.
+    """
+    out_paths, existing = _load_resume_state(output_jsonl, explorer, top_k_list)
+    resumed_ids = set.intersection(*(_case_ids(rows) for rows in existing.values()))
+    kept_per_k: dict[int, list[dict]] = {}
+    for k, path in out_paths.items():
+        kept_per_k[k] = _dedupe_rows(existing[k], resumed_ids)
+        if path.is_file():
+            _rewrite_results(path, kept_per_k[k])
+    return resumed_ids, kept_per_k
 
 
 def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
@@ -401,11 +585,14 @@ def run(
     ),
     output_jsonl: str | None = typer.Option(
         None, "--output", "-o",
-        help="Save per-instance results to JSONL. Supports {explorer} and {k} placeholders.",
+        help="Save per-instance results to JSONL. Supports {explorer} and {k} "
+        "placeholders; leaving one out points several explorers or budgets at a "
+        "single file, which --resume cannot continue.",
     ),
     resume: bool = typer.Option(
         False, "--resume/--no-resume",
-        help="Resume from existing output files, skipping already-evaluated instances.",
+        help="Resume from existing output files, skipping instances already scored "
+        "at every top_k. Needs one output file per explorer and budget.",
     ),
 ) -> None:
     """Run evaluation for one or more explorers."""
@@ -453,7 +640,7 @@ def run(
 
     issue_map: dict[str, str] = {}
     if issue_map_file and issue_map_file.is_file():
-        with open(issue_map_file) as f:
+        with open(issue_map_file, encoding="utf-8") as f:
             issue_map = json.load(f)
     elif trajs_dir and trajs_dir.is_dir():
         issue_map = _load_issue_map(trajs_dir)
@@ -805,6 +992,13 @@ def run(
     }
 
     # ── evaluation loop ──
+    if output_jsonl:
+        if resume:
+            with _resume_mismatch_exits():
+                _check_resume_outputs(output_jsonl, explorer_names, top_k_list)
+                _check_resume_files(output_jsonl, explorer_names, top_k_list)
+        else:
+            _clear_outputs(output_jsonl, explorer_names, top_k_list)
     total_records = len(records)
 
     for name in explorer_names:
@@ -820,39 +1014,22 @@ def run(
         resumed_ids: set[str] = set()
 
         if resume and output_jsonl:
-            # Find instance_ids completed in ALL top_k files. Instances
-            # present in only a subset get re-run, so their usage must not
-            # be accumulated here or it would be counted twice.
-            per_k_ids: list[set[str]] = []
+            with _resume_mismatch_exits():
+                resumed_ids, kept_per_k = _reconcile_resume_state(output_jsonl, name, top_k_list)
+            # Pre-load the surviving rows into the accumulators.
             for k in top_k_list:
-                out_path = _format_output_path(output_jsonl, name, k)
-                existing = _load_existing_results(out_path)
-                ids = {r["instance_id"] for r in existing}
-                per_k_ids.append(ids)
-                # Pre-load into accumulators
-                for r in existing:
+                for r in kept_per_k[k]:
                     per_k_results[k].append(r)
                     per_k_evaluated[k] += 1
                     for m in METRICS:
-                        per_k_totals[k][m] += r["metrics"].get(m, 0.0)
-            if per_k_ids:
-                resumed_ids = per_k_ids[0]
-                for s in per_k_ids[1:]:
-                    resumed_ids &= s
-                # Token usage is per-case: count each resumed instance once.
-                for iid in resumed_ids:
-                    row = next(
-                        (
-                            r
-                            for r in per_k_results[top_k_list[0]]
-                            if r.get("instance_id") == iid
-                        ),
-                        None,
-                    )
-                    tu = TokenUsage.from_dict(row.get("token_usage")) if row else None
-                    if tu is not None:
-                        usage_totals.add(tu)
-                        usage_cases += 1
+                        per_k_totals[k][m] += (r.get("metrics") or {}).get(m, 0.0)
+            # Token usage is per-case, not per-budget: count each resumed
+            # instance once, from its row in the first top_k file.
+            for r in per_k_results[top_k_list[0]]:
+                tu = TokenUsage.from_dict(r.get("token_usage"))
+                if tu is not None:
+                    usage_totals.add(tu)
+                    usage_cases += 1
 
         remaining_records = [r for r in records if r.get("instance_id", "") not in resumed_ids]
         total_remaining = len(remaining_records)
@@ -923,13 +1100,27 @@ def run(
                 result_per_k[k] = scores
             return result_per_k
 
-        # Open output files for incremental append
+        # Open output files for incremental append: a fresh run cleared them
+        # above, and --resume continues what is on disk. An --output template
+        # without {k} points several budgets at one file, so they share a
+        # single handle rather than overwriting each other.
         out_files: dict[int, object] = {}
+        out_handles = contextlib.ExitStack()
         if output_jsonl:
-            for k in top_k_list:
-                out_path = _format_output_path(output_jsonl, name, k)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_files[k] = out_path.open("a")
+            # Opening is staged: a budget file that cannot be opened (no
+            # permission, no space) closes the handles already opened for the
+            # earlier budgets instead of leaking them.
+            with contextlib.ExitStack() as opening:
+                by_path: dict[Path, object] = {}
+                for k in top_k_list:
+                    out_path = _format_output_path(output_jsonl, name, k)
+                    if out_path not in by_path:
+                        out_path.parent.mkdir(parents=True, exist_ok=True)
+                        by_path[out_path] = opening.enter_context(
+                            out_path.open("a", encoding="utf-8")
+                        )
+                    out_files[k] = by_path[out_path]
+                out_handles = opening.pop_all()
 
         def _record_result(
             iid: str,
@@ -960,8 +1151,7 @@ def run(
                 per_k_evaluated[k] += 1
                 per_k_results[k].append(row)
                 if k in out_files:
-                    out_files[k].write(json.dumps(row, ensure_ascii=False) + "\n")
-                    out_files[k].flush()
+                    _append_row(out_files[k], row)
             # Token usage is per-case, not per-top_k: accumulate once.
             if usage is not None:
                 usage_totals.add(usage)
@@ -1067,10 +1257,9 @@ def run(
                     _log_case(iid, done, case_scores, usage, case_dt, elapsed, eta)
         except KeyboardInterrupt:
             interrupted = True
-
-        # Close output files
-        for fh in out_files.values():
-            fh.close()
+        finally:
+            # Close output files (budgets may share one handle)
+            out_handles.close()
 
         if interrupted:
             print(file=sys.stderr)

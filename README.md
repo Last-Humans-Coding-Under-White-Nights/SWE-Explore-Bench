@@ -145,6 +145,15 @@ uv run python eval_runner.py \
 
 `--issue-map` is optional when the benchmark file already contains `problem_statement`; otherwise it can provide `{instance_id: issue_text}`.
 
+`--resume` continues the existing `--output` files instead of starting over:
+
+- A case counts as done only when it is present in *every* `top_k` file. One that an interrupt left in some files but not others is dropped from disk and re-run, so it contributes exactly one row per budget and a resumed run reports the same numbers as an uninterrupted one.
+- Each explorer and budget needs a file of its own, so keep `{explorer}` and `{k}` in `--output`. A result row records no `top_k`, so budgets sharing one file cannot be told apart and the run stops rather than guess.
+- If a `top_k` file is missing entirely — you added a budget, or changed `--output` — the run stops instead of discarding the rows the other budgets already hold.
+- Every explorer's files are checked before the first one starts, so an unresumable layout stops the run right away rather than once the run reaches that explorer.
+
+Without `--resume` the output files are rewritten from scratch.
+
 Available explorers include:
 
 | Family | Explorers |
@@ -381,6 +390,7 @@ SWE-Explore-Bench/
 |-- eval.py                     # ExploreEvaluator and metrics
 |-- eval_runner.py              # CLI driver for all explorers
 |-- stats.py                    # Benchmark-level statistics
+|-- tests/                      # Test suite (see Tests below)
 |-- explorers/                  # Retrieval, agentic, and academic explorer wrappers
 |-- quality/                    # Downstream patch-quality validation
 |-- traj_datasets/              # Trajectory loaders and unified Pydantic schema
@@ -389,6 +399,14 @@ SWE-Explore-Bench/
 |-- figures/                    # Paper figures used by this README
 `-- pyproject.toml
 ```
+
+## Tests
+
+```bash
+uv run --locked python -m pytest tests quality/tests/test_cli_agent_explorers.py
+```
+
+CI runs that on Linux and Windows with `PYTHONWARNDEFAULTENCODING=1`, so any text I/O that relies on the platform default encoding fails the suite — always pass `encoding="utf-8"` when opening or reading a text file, since the default is UTF-8 on Linux but cp1252 on Windows.
 
 ## Citation
 

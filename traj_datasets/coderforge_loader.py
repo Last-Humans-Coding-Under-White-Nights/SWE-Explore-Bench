@@ -154,7 +154,7 @@ def load_coderforge_dataset(
     total = skipped = failed = 0
 
     console.log(f"Loading {jsonl_file.name}...")
-    with jsonl_file.open() as f:
+    with jsonl_file.open(encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -176,7 +176,7 @@ def load_coderforge_dataset(
                 if out_dir is not None:
                     source_id = getattr(traj.info, "source_trajectory_id", None) or traj.info.instance_id
                     out_file = out_dir / f"{source_id}.json"
-                    with out_file.open("w") as fp:
+                    with out_file.open("w", encoding="utf-8") as fp:
                         json.dump(traj.model_dump(), fp, ensure_ascii=False)
             except Exception as e:
                 failed += 1
@@ -185,7 +185,7 @@ def load_coderforge_dataset(
     if issue_map_output is not None:
         issue_map_path = Path(issue_map_output)
         issue_map_path.parent.mkdir(parents=True, exist_ok=True)
-        with issue_map_path.open("w") as f:
+        with issue_map_path.open("w", encoding="utf-8") as f:
             json.dump(issue_map, f, ensure_ascii=False, indent=2)
 
     console.print(

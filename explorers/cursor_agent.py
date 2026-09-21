@@ -76,6 +76,8 @@ class CursorAgentExplorer(Explorer):
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                encoding="utf-8",
+                errors="replace",
             )
             raw = completed.stdout.strip()
         except FileNotFoundError:

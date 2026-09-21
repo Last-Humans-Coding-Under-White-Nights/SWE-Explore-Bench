@@ -19,7 +19,7 @@ console = Console()
 
 def extract_token_stats(traj_path: Path) -> dict[str, Any]:
     """Extract token statistics from a trajectory file."""
-    data = json.loads(traj_path.read_text())
+    data = json.loads(traj_path.read_text(encoding="utf-8"))
 
     total_prompt_tokens = 0
     total_completion_tokens = 0
@@ -98,7 +98,7 @@ def recur_find(d: dict[str, Any], key: str) -> Any:
 
 
 def extract_solve_stats(solve_path: Path) -> dict[str, Any]:
-    data = json.loads(solve_path.read_text())
+    data = json.loads(solve_path.read_text(encoding="utf-8"))
     return {"file": solve_path.name, "path": str(solve_path), **data}
 
 
@@ -964,7 +964,7 @@ def main(
                         f"  {format_pruner_column_name(key)}: {format_number(value)}"
                     )
     if stats_file:
-        json.dump(all_stats, open(stats_file, "w"), indent=2)
+        json.dump(all_stats, open(stats_file, "w", encoding="utf-8"), indent=2)
     if plot_output:
         # save stats as json
         plot_token_distribution(all_stats, plot_output)
@@ -976,7 +976,7 @@ def extract_bash_commands(traj_path: Path) -> list[tuple[int, str, int]]:
     Returns a list of tuples: (step_index, command, completion_tokens)
     where completion_tokens is the completion tokens for this step.
     """
-    data = json.loads(traj_path.read_text())
+    data = json.loads(traj_path.read_text(encoding="utf-8"))
     messages = data.get("messages", [])
 
     commands = []
@@ -1493,7 +1493,7 @@ def extract_read_operations_with_output(
     Only extracts commands from bash code blocks, not from THOUGHT sections.
     """
     try:
-        data = json.loads(traj_path.read_text())
+        data = json.loads(traj_path.read_text(encoding="utf-8"))
     except Exception:
         return []
 
@@ -1561,7 +1561,7 @@ def extract_edit_operations(traj_path: Path) -> set[str]:
     - Redirection operations (command > file, command >> file)
     """
     try:
-        data = json.loads(traj_path.read_text())
+        data = json.loads(traj_path.read_text(encoding="utf-8"))
     except Exception:
         return set()
 

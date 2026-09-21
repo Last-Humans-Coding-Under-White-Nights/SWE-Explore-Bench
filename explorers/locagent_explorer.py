@@ -107,7 +107,7 @@ class LocAgentExplorer(Explorer):
                 "problem_statement": problem_with_hint,
                 "patch": "",
             }
-            with open(dataset_file, "w") as f:
+            with open(dataset_file, "w", encoding="utf-8") as f:
                 f.write(json.dumps(instance_data) + "\n")
 
             cmd = [

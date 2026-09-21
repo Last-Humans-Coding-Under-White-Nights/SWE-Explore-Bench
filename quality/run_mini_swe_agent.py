@@ -88,14 +88,14 @@ def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
     """原子写入 JSON 文件，避免实时日志留下半截内容。"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    tmp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp_path.replace(path)
 
 
 def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
     """追加一条 JSONL 记录并立即 flush。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
+    with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
         f.flush()
 
@@ -461,7 +461,7 @@ for root, dirs, files in os.walk(workdir):
         if rel_path in keep_files:
             continue
         if fname == '__init__.py':
-            open(abs_path, 'w').close()
+            open(abs_path, 'w', encoding='utf-8').close()
             continue
         try:
             os.remove(abs_path)
@@ -473,7 +473,7 @@ for rel_path, regions in region_map.items():
     abs_path = os.path.join(workdir, rel_path)
     if not os.path.isfile(abs_path):
         continue
-    with open(abs_path, 'r', errors='replace') as f:
+    with open(abs_path, 'r', encoding='utf-8', errors='replace') as f:
         lines = f.readlines()
     kept = set()
     n = len(lines)
@@ -707,7 +707,7 @@ async def generate_patches_mini_agent(
 
     # 加载 bench
     items: list[dict[str, Any]] = []
-    with open(bench_path) as f:
+    with open(bench_path, encoding="utf-8") as f:
         for line in f:
             item = json.loads(line)
             if item["ground_truth"].get("read_core_regions"):
@@ -731,7 +731,7 @@ async def generate_patches_mini_agent(
     # 断点续跑
     done_ids: set[str] = set()
     if output_path.exists():
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             for line in f:
                 try:
                     done_ids.add(json.loads(line)["instance_id"])
@@ -755,7 +755,7 @@ async def generate_patches_mini_agent(
     errors = 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_f = open(output_path, "a")
+    out_f = open(output_path, "a", encoding="utf-8")
 
     # 日志文件
     log_f = None
@@ -766,7 +766,7 @@ async def generate_patches_mini_agent(
         log_path = log_dir / f"mini_swe_agent_{mode}_{ts}.jsonl"
         traj_dir = log_dir / f"mini_swe_agent_{mode}_{ts}_traj"
         traj_dir.mkdir(parents=True, exist_ok=True)
-        log_f = open(log_path, "a")
+        log_f = open(log_path, "a", encoding="utf-8")
         console.log(f"Logging debug jsonl to {log_path}")
         console.log(f"Logging traj json to {traj_dir}")
 
@@ -842,7 +842,8 @@ async def generate_patches_mini_agent(
                                 agent_result["trajectory_data"],
                                 ensure_ascii=False,
                                 indent=2,
-                            )
+                            ),
+                            encoding="utf-8",
                         )
                 return True
             except Exception as e:
@@ -977,7 +978,7 @@ def main(
     regions_map: dict[str, list[dict[str, Any]]] | None = None
     if mode == "explorer" and regions_file is not None:
         regions_map = {}
-        with open(regions_file) as f:
+        with open(regions_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -993,7 +994,7 @@ def main(
     instance_ids_filter: set[str] | None = None
     if instance_list is not None and instance_list.is_file():
         instance_ids_filter = set()
-        for line in instance_list.read_text().splitlines():
+        for line in instance_list.read_text(encoding="utf-8").splitlines():
             line = line.strip()
             if line:
                 instance_ids_filter.add(line.removeprefix("swebench."))

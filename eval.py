@@ -137,7 +137,7 @@ class ExploreEvaluator:
         bench_data_path: 每行一个 JSON 的 bench 文件。
         file_line_counts: 可选，instance_id -> { path -> 行数 }，用于解析 end=-1 与 start<0。
         """
-        with open(bench_data_path, "r") as f:
+        with open(bench_data_path, "r", encoding="utf-8") as f:
             self.bench_data = [json.loads(line) for line in f.readlines()]
         self.bench_data_dict = {item["instance_id"]: item for item in self.bench_data}
         self.file_line_counts = file_line_counts or {}

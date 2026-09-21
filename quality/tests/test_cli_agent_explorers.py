@@ -82,7 +82,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
             with self.subTest(explorer=case.explorer_cls.__name__):
                 with tempfile.TemporaryDirectory() as repo:
                     (Path(repo) / "src").mkdir()
-                    (Path(repo) / "src/main.py").write_text("# source\n" * 20)
+                    (Path(repo) / "src/main.py").write_text("# source\n" * 20, encoding="utf-8")
                     seen: dict[str, object] = {}
 
                     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]

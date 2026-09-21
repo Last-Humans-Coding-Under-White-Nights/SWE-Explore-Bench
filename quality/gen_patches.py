@@ -88,7 +88,7 @@ def _load_dataset_instance_ids(dataset_key: str) -> set[str] | None:
 def _read_lines(file_path: Path, start: int, end: int) -> str:
     """读取文件 [start, end] 行 (1-based 闭区间)。"""
     try:
-        all_lines = file_path.read_text(errors="replace").splitlines(keepends=True)
+        all_lines = file_path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except (OSError, UnicodeDecodeError):
         return ""
     total = len(all_lines)
@@ -448,7 +448,7 @@ async def generate_patches(
 
     # 加载 bench
     items: list[dict[str, Any]] = []
-    with open(bench_path) as f:
+    with open(bench_path, encoding="utf-8") as f:
         for line in f:
             item = json.loads(line)
             if item["ground_truth"].get("read_core_regions"):
@@ -467,7 +467,7 @@ async def generate_patches(
     # 断点续跑
     done_ids: set[str] = set()
     if output_path.exists():
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             for line in f:
                 try:
                     done_ids.add(json.loads(line)["instance_id"])
@@ -491,7 +491,7 @@ async def generate_patches(
     errors = 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_f = open(output_path, "a")
+    out_f = open(output_path, "a", encoding="utf-8")
 
     # 日志文件
     log_f = None
@@ -499,7 +499,7 @@ async def generate_patches(
         log_dir.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y%m%d_%H%M%S")
         log_path = log_dir / f"gen_patches_{mode}_{ts}.jsonl"
-        log_f = open(log_path, "a")
+        log_f = open(log_path, "a", encoding="utf-8")
         console.log(f"Logging to {log_path}")
 
     async def process_one(item: dict[str, Any]) -> None:

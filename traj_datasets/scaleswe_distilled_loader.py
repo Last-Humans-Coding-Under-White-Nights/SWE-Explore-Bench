@@ -147,7 +147,7 @@ def load_distilled_dataset(
                 trajectories.append(traj)
                 if output_dir is not None:
                     out_file = out / f"{traj.info.instance_id}.json"
-                    with out_file.open("w") as fp:
+                    with out_file.open("w", encoding="utf-8") as fp:
                         json.dump(traj.model_dump(), fp, ensure_ascii=False)
             except Exception as e:
                 failed += 1

@@ -69,7 +69,7 @@ def _filter_supported_predictions(preds_path: Path, output_path: Path) -> tuple[
     """过滤出 harness 支持的 predictions，写入 output_path。返回 (kept, skipped)。"""
     kept = 0
     skipped = 0
-    with open(preds_path) as f_in, open(output_path, "w") as f_out:
+    with open(preds_path, encoding="utf-8") as f_in, open(output_path, "w", encoding="utf-8") as f_out:
         for line in f_in:
             line = line.strip()
             if not line:
@@ -115,7 +115,7 @@ def _split_predictions(predictions_path: Path) -> dict[str, list[dict]]:
     id_sets = _load_instance_id_sets()
 
     preds: list[dict] = []
-    with open(predictions_path) as f:
+    with open(predictions_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
@@ -165,7 +165,7 @@ def _materialize_eval_summary(report_file, report_dir: Path) -> Path | None:
         else:
             return None
     try:
-        harness = json.loads(src.read_text())
+        harness = json.loads(src.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return None
     submitted = int(harness.get("submitted_instances", 0))
@@ -183,10 +183,10 @@ def _materialize_eval_summary(report_file, report_dir: Path) -> Path | None:
     }
     report_dir.mkdir(parents=True, exist_ok=True)
     target_summary = report_dir / "eval_summary.json"
-    target_summary.write_text(json.dumps(summary, indent=2))
+    target_summary.write_text(json.dumps(summary, indent=2), encoding="utf-8")
     # Preserve the full harness report alongside (for ID-level details).
     target_full = report_dir / "harness_report.json"
-    target_full.write_text(json.dumps(harness, indent=2))
+    target_full.write_text(json.dumps(harness, indent=2), encoding="utf-8")
     try:
         src.unlink()
     except OSError:
@@ -303,7 +303,7 @@ def run_auto_split(
         # 写临时 predictions 文件
         tmp_path = report_dir / f"predictions_{group_name}.jsonl"
         tmp_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(tmp_path, "w") as f:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             for p in preds:
                 f.write(json.dumps(p, ensure_ascii=False) + "\n")
 
