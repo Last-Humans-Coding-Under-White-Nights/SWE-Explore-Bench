@@ -387,18 +387,24 @@ def test_opencode_usage_keeps_reasoning_inside_output(monkeypatch):
     assert usage.total == 300
 
 
-def test_deveco_usage_falls_back_without_a_session_query(monkeypatch):
+def test_deveco_usage_queries_its_session_store(monkeypatch):
     from explorers.deveco import DevEcoExplorer
 
-    def fail(*a, **kw):
-        raise AssertionError("no db query expected")
+    seen = {}
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+    rows = [dict(zip(cols, (1, 2, 0, 0, 0)), sub=0), dict(zip(cols, (3, 4, 0, 0, 0)), sub=1)]
 
-    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fail)
-    step = {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}
+    def fake_run(cmd, **kw):
+        seen.update(cmd=cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows))
 
-    usage = DevEcoExplorer(repo_root=Path("."))._collect_usage(json.dumps(step), env={})
+    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fake_run)
 
-    assert usage == TokenUsage(input_tokens=10, output_tokens=5)
+    usage = DevEcoExplorer(repo_root=Path("."), bin_path="dv-test")._collect_usage("", env={})
+
+    assert seen["cmd"][:3] == ["dv-test", "db", "--pure"]
+    assert usage.total == 10
+    assert usage.subagent == TokenUsage(input_tokens=3, output_tokens=4)
 
 
 def test_subagent_breakdown_roundtrips_and_merges():

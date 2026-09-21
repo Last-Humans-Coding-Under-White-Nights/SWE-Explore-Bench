@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ._cli_agent_base import BaseCliAgentExplorer
+from ._cli_agent_base import SESSION_USAGE_QUERY, BaseCliAgentExplorer
 
 EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
@@ -53,7 +53,7 @@ class DevEcoExplorer(BaseCliAgentExplorer):
         "DEVECO_CONFIG_DIR",
         "DEVECO_DB",
     )
-    # No session_usage_query: the `db` subcommand and schema are unverified here.
+    session_usage_query: ClassVar[str | None] = SESSION_USAGE_QUERY
     install_hint: ClassVar[str] = (
         "Install and configure the `deveco` binary, or pass --deveco-bin."
     )
