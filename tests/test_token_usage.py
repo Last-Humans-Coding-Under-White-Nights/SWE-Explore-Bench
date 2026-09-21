@@ -300,12 +300,16 @@ def test_extract_usage_from_array_event_lines():
     assert usage.output_tokens == 5
 
 
-def _collect_with_db(monkeypatch, db_stdout, stdout_text=""):
-    monkeypatch.setattr(
-        "explorers._cli_agent_base.subprocess.run",
-        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout=db_stdout),
+def _collect_with_db(monkeypatch, db_stdout, stdout_text="", seen=None, env=None):
+    def fake_run(cmd, **kw):
+        if seen is not None:
+            seen.update(cmd=cmd, **kw)
+        return subprocess.CompletedProcess(cmd, 0, stdout=db_stdout)
+
+    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fake_run)
+    return OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")._collect_usage(
+        stdout_text, env={"HOME": "/tmp/isolated-home"} if env is None else env
     )
-    return OpenCodeExplorer(repo_root=Path("."))._collect_usage(stdout_text, env={})
 
 
 def test_opencode_usage_includes_subagent_sessions(monkeypatch):
@@ -333,5 +337,39 @@ def test_opencode_usage_falls_back_to_stream(monkeypatch, db_stdout):
     step = {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}
 
     usage = _collect_with_db(monkeypatch, db_stdout, json.dumps(step))
+
+    assert usage == TokenUsage(input_tokens=10, output_tokens=5)
+
+
+def test_opencode_usage_query_runs_in_the_isolated_home(monkeypatch):
+    seen = {}
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+
+    _collect_with_db(monkeypatch, json.dumps([dict(zip(cols, (1, 2, 0, 0, 0)), sub=0)]), seen=seen)
+
+    assert seen["cmd"][:2] == ["oc-test", "db"]
+    assert seen["cmd"][-2:] == ["--format", "json"]
+    assert seen["env"] == {"HOME": "/tmp/isolated-home"}
+
+
+def test_opencode_isolation_drops_inherited_db_override():
+    env = {"OPENCODE_DB": "/somewhere/else/opencode.db", "XDG_DATA_HOME": "/xdg"}
+
+    OpenCodeExplorer(repo_root=Path("."))._isolate_env(env, Path("/tmp/home"))
+
+    assert "OPENCODE_DB" not in env
+    assert env["HOME"] == str(Path("/tmp/home"))
+
+
+def test_deveco_usage_falls_back_without_a_session_query(monkeypatch):
+    from explorers.deveco import DevEcoExplorer
+
+    def fail(*a, **kw):
+        raise AssertionError("no db query expected")
+
+    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fail)
+    step = {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}
+
+    usage = DevEcoExplorer(repo_root=Path("."))._collect_usage(json.dumps(step), env={})
 
     assert usage == TokenUsage(input_tokens=10, output_tokens=5)

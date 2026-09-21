@@ -51,7 +51,9 @@ class DevEcoExplorer(BaseCliAgentExplorer):
         "DEVECO_CONFIG",
         "DEVECO_CONFIG_CONTENT",
         "DEVECO_CONFIG_DIR",
+        "DEVECO_DB",
     )
+    # No session_usage_query: the `db` subcommand and schema are unverified here.
     install_hint: ClassVar[str] = (
         "Install and configure the `deveco` binary, or pass --deveco-bin."
     )

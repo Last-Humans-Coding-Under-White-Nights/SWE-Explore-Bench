@@ -131,6 +131,7 @@ class BaseCliAgentExplorer(Explorer):
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
 
     config_override_vars: ClassVar[tuple[str, ...]] = ()
+    session_usage_query: ClassVar[str | None] = None
 
     def build_cmd(self) -> list[str]:
         """Return the argv for one run. The prompt is delivered on stdin."""
@@ -138,9 +139,12 @@ class BaseCliAgentExplorer(Explorer):
 
     def _collect_usage(self, stdout_text: str, env: dict[str, str]) -> TokenUsage | None:
         """Token usage of the finished run; called before the temp home is removed."""
+        stream = extract_usage_from_jsonl(stdout_text)
+        if not self.session_usage_query:
+            return stream
         try:
             proc = subprocess.run(
-                [self.bin_path, "db", SESSION_USAGE_QUERY, "--format", "json"],
+                [self.bin_path, "db", self.session_usage_query, "--format", "json"],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
@@ -171,7 +175,7 @@ class BaseCliAgentExplorer(Explorer):
                 "token usage excludes sub-agents if there were any",
                 level="info",
             )
-            return extract_usage_from_jsonl(stdout_text)
+            return stream
         return usage
 
     def _format_prompt(self, query: str, top_k: int) -> str:
