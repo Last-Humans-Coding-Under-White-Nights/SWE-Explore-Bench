@@ -87,31 +87,32 @@ def _rows(path: Path) -> list[dict]:
     return [json.loads(ln) for ln in text.splitlines() if ln.strip()]
 
 
-def test_resume_after_interrupt_matches_uninterrupted_run(tmp_path, monkeypatch):
+@pytest.mark.parametrize("interrupted_case", [1, 3])
+def test_resume_after_interrupt_matches_uninterrupted_run(tmp_path, monkeypatch, interrupted_case):
     bench = _write_bench(tmp_path / "bench.jsonl")
     clean_dir, torn_dir = tmp_path / "clean", tmp_path / "torn"
 
     clean = _run(bench, clean_dir)
     assert clean.exit_code == 0
 
-    # Interrupt case-3 after its top1.jsonl row is written, before top2.jsonl.
+    # Interrupt after top1 is written; case 1 leaves top2 empty.
     append_row = eval_runner._append_row
     written = 0
 
-    def interrupt_case_3(fh, row):
+    def interrupt_case(fh, row):
         nonlocal written
-        if row["instance_id"] == "case-3":
+        if row["instance_id"] == f"case-{interrupted_case}":
             written += 1
             if written == 2:
                 raise KeyboardInterrupt
         append_row(fh, row)
 
-    monkeypatch.setattr(eval_runner, "_append_row", interrupt_case_3)
+    monkeypatch.setattr(eval_runner, "_append_row", interrupt_case)
     interrupted = _run(bench, torn_dir)
     assert interrupted.exit_code == 130
-    # The tear under test: case-3 reached top1.jsonl but not top2.jsonl.
-    assert len(_rows(torn_dir / "oracle" / "top1.jsonl")) == 3
-    assert len(_rows(torn_dir / "oracle" / "top2.jsonl")) == 2
+    # The interrupted case reached top1.jsonl but not top2.jsonl.
+    assert len(_rows(torn_dir / "oracle" / "top1.jsonl")) == interrupted_case
+    assert len(_rows(torn_dir / "oracle" / "top2.jsonl")) == interrupted_case - 1
 
     monkeypatch.setattr(eval_runner, "_append_row", append_row)
     resumed = _run(bench, torn_dir, "--resume")
@@ -403,12 +404,13 @@ def test_resume_refuses_a_file_whose_explorer_field_is_not_a_name(tmp_path):
         eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
 
 
-def test_reconcile_ignores_rows_that_identify_no_case(tmp_path):
+@pytest.mark.parametrize("invalid_id", [None, "", 7, [], {}])
+def test_reconcile_ignores_rows_that_identify_no_case(tmp_path, invalid_id):
     """An empty instance_id would otherwise skip every bench case missing one."""
     done = {"instance_id": "case-1", "metrics": {}}
     blank = {"instance_id": "", "metrics": {}}
-    null = {"instance_id": None, "metrics": {}}
-    template = _seed_results(tmp_path, {1: [done, blank, null], 2: [done, blank, null]})
+    invalid = {"instance_id": invalid_id, "metrics": {}}
+    template = _seed_results(tmp_path, {1: [done, blank, invalid], 2: [done, blank, invalid]})
 
     resumed_ids, kept = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
 

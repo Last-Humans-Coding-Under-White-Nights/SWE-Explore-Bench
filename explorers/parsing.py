@@ -804,7 +804,7 @@ _usage_collector_var: contextvars.ContextVar[TokenUsage | None] = (
 )
 
 
-def _usage_to_dict(usage: Any) -> dict[str, Any] | None:
+def usage_to_dict(usage: Any) -> dict[str, Any] | None:
     """Coerce a provider usage object (dict or pydantic v1/v2) to a dict."""
     if isinstance(usage, dict):
         return usage
@@ -860,7 +860,7 @@ def register_litellm_usage_callback() -> None:
         resp_usage = getattr(response, "usage", None)
         if resp_usage is None:
             return
-        data = _usage_to_dict(resp_usage)
+        data = usage_to_dict(resp_usage)
         if data is not None:
             report_usage(extract_usage(data))
 

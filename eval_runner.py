@@ -247,7 +247,7 @@ def _dedupe_rows(rows: list[dict], keep: set[str]) -> list[dict]:
     latest: dict[str, dict] = {}
     for row in rows:
         iid = row.get("instance_id")
-        if iid in keep:
+        if isinstance(iid, str) and iid in keep:
             latest[iid] = row
     return list(latest.values())
 
@@ -355,6 +355,8 @@ def _load_resume_state(
     # A budget with no file at all has finished no cases, so pruning against it
     # would discard every row the other budgets hold. That means the --top-k
     # set or the --output path changed, not that a write was interrupted.
+    # Existing empty files are valid: a kill during the first case can leave
+    # later budgets empty. Resume must rerun that incomplete case.
     missing = [path for path in out_paths.values() if not path.is_file()]
     if missing and any(existing.values()):
         raise ResumeMismatch(

@@ -25,6 +25,9 @@ dependencies = [
     "sb-cli>=0.1.5",
 ]
 
+[dependency-groups]
+dev = ["pytest>=8"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]

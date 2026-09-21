@@ -403,7 +403,7 @@ SWE-Explore-Bench/
 ## Tests
 
 ```bash
-uv run --with pytest python -m pytest tests
+uv run --locked python -m pytest tests quality/tests/test_cli_agent_explorers.py
 ```
 
 CI runs that on Linux and Windows with `PYTHONWARNDEFAULTENCODING=1`, so any text I/O that relies on the platform default encoding fails the suite — always pass `encoding="utf-8"` when opening or reading a text file, since the default is UTF-8 on Linux but cp1252 on Windows.

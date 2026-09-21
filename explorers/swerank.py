@@ -10,7 +10,7 @@ from sentence_transformers import SentenceTransformer
 
 from .base import ContextRegion, ExplorerResult
 from .chunking import Chunk, chunk_repo
-from .parsing import _usage_to_dict, extract_usage, report_usage
+from .parsing import extract_usage, report_usage, usage_to_dict
 
 
 def _post_chat_completion(
@@ -49,7 +49,7 @@ def _report_openai_usage(resp: Any) -> None:
     usage = getattr(resp, "usage", None)
     if usage is None:
         return
-    data = _usage_to_dict(usage)
+    data = usage_to_dict(usage)
     if data is not None:
         report_usage(extract_usage(data))
 

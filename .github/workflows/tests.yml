@@ -5,19 +5,30 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   tests:
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
           enable-cache: true
       - run: uv sync --locked
-      - run: uv run --with pytest python -m pytest tests
+      # Other quality tests require minisweagent or the absent
+      # quality.patch_diagnostics module; keep those opt-in.
+      - run: uv run --locked python -m pytest tests quality/tests/test_cli_agent_explorers.py
         env:
           # Make text I/O that relies on the platform default encoding a test
           # failure, so a cp1252 Windows runner cannot mangle non-ASCII paths.
