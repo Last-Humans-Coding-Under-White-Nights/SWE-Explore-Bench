@@ -1,18 +1,23 @@
 """Shared base for explorers that shell out to a coding-agent CLI."""
 from __future__ import annotations
 
-import json
+import errno
 import os
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, List
 
 from .base import Explorer, ExplorerResult
-from .parsing import extract_usage_from_jsonl, parse_relevant_files, report_usage
+from .parsing import (
+    extract_usage_from_jsonl,
+    iter_events,
+    parse_relevant_files,
+    report_usage,
+)
 
 EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
@@ -40,6 +45,17 @@ Do exactly this, but without modifications. You are planner, so you just provide
 ANSWER_MARKER = "RELEVANT_FILES:"
 
 XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+#: Subdirectory of a profile whose files are placed into the checkout per run.
+CHECKOUT_SEED_DIR = "checkout"
+#: A file written into the checkout for one run, with the content written.
+SeededFile = tuple[Path, bytes]
+
+
+@dataclass
+class CheckoutSeed:
+    files: list[SeededFile] = field(default_factory=list)
+    directories: list[Path] = field(default_factory=list)
+
 
 LOG_LEVELS = {"info": 0, "debug": 1, "trace": 2}
 _log_level = 0
@@ -67,16 +83,8 @@ def _extract_output_text(raw: str) -> str:
 
     texts: list[str] = []
     saw_event = False
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            # One malformed event must not discard the rest of the stream.
-            continue
-        if not isinstance(event, dict) or "type" not in event:
+    for event in iter_events(raw):
+        if "type" not in event:
             continue
         saw_event = True
         if event["type"] != "text":
@@ -140,6 +148,74 @@ class BaseCliAgentExplorer(Explorer):
             raise FileNotFoundError(f"{self.config_filename} not found at {config_src}")
         env[self.config_env_var] = str(self.config_dir.resolve())
 
+    def _seed_checkout(self) -> CheckoutSeed:
+        """Copy profile files, recording only paths created by this run.
+
+        Roll back here on failure, before a partial seed can be lost or a
+        source-file error can be mistaken for a missing CLI binary.
+        """
+        seeded = CheckoutSeed()
+        if self.config_dir is None:
+            return seeded
+        seed_root = self.config_dir / CHECKOUT_SEED_DIR
+        if not seed_root.is_dir():
+            return seeded
+        try:
+            for source in sorted(p for p in seed_root.rglob("*") if p.is_file()):
+                target = self.repo_root / source.relative_to(seed_root)
+                if target.exists() or target.is_symlink():
+                    continue
+                parents = []
+                parent = target.parent
+                while parent != self.repo_root:
+                    parents.append(parent)
+                    parent = parent.parent
+                # Never write through a checkout directory symlink.
+                if any(parent.is_symlink() for parent in parents):
+                    continue
+                content = source.read_bytes()
+                for parent in reversed(parents):
+                    if not parent.exists():
+                        parent.mkdir()
+                        seeded.directories.append(parent)
+                # Exclusive creation also protects paths created concurrently.
+                try:
+                    stream = target.open("xb")
+                except FileExistsError:
+                    continue
+                try:
+                    with stream:
+                        stream.write(content)
+                except BaseException:
+                    try:
+                        target.unlink(missing_ok=True)
+                    except OSError as exc:
+                        _log(f"Could not remove partial seed {target}: {exc}", "info")
+                    raise
+                seeded.files.append((target, content))
+        except BaseException:
+            self._unseed_checkout(seeded)
+            raise
+        return seeded
+
+    def _unseed_checkout(self, seeded: CheckoutSeed) -> None:
+        """Best-effort removal of unchanged seed files and created empty dirs."""
+        for target, content in seeded.files:
+            try:
+                if (not target.is_symlink() and target.is_file()
+                        and target.read_bytes() == content):
+                    target.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                _log(f"Could not remove seed {target}: {exc}", "info")
+        for directory in reversed(seeded.directories):
+            try:
+                directory.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTEMPTY, errno.EEXIST):
+                    _log(f"Could not remove seed directory {directory}: {exc}", "info")
+
     def explore(
         self, *, instance_id: str, query: str, top_k: int = 5
     ) -> List[ExplorerResult]:
@@ -158,6 +234,7 @@ class BaseCliAgentExplorer(Explorer):
         with tempfile.TemporaryDirectory(prefix="cli-agent-home-") as tmp_home:
             self._isolate_env(env, Path(tmp_home))
             self._prepare_config(env)
+            seeded = self._seed_checkout()
 
             try:
                 completed = subprocess.run(
@@ -184,6 +261,8 @@ class BaseCliAgentExplorer(Explorer):
                 raise RuntimeError(
                     f"{self.cli_display_name} timed out after {self.timeout}s"
                 )
+            finally:
+                self._unseed_checkout(seeded)
 
             stderr_text = completed.stderr or ""
             stdout_text = completed.stdout or ""

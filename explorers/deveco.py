@@ -33,14 +33,15 @@ Do exactly this, but without modifications. You are planner, so you just provide
 class DevEcoExplorer(BaseCliAgentExplorer):
     """DevEco Code CLI explorer for local codebases.
 
-    Uses ``deveco run --format json --dir ...`` with the prompt on stdin, and
-    parses the final response for the shared ``RELEVANT_FILES`` output
-    contract.
+    Uses ``deveco run --auto --format json --dir ...`` with the prompt on
+    stdin, and parses the final response for the shared ``RELEVANT_FILES``
+    output contract.
     """
 
     bin_path: str = "deveco"
-    #: OpenCode's ``--auto`` has no DevEco equivalent; this is the analogue that
-    #: keeps an unattended run from stalling on an approval prompt.
+    #: DevEco Code 0.1.9 resolved approval prompts with this flag; 0.1.12
+    #: ignores it and uses OpenCode's ``--auto`` instead. Both flags follow
+    #: ``skip_permissions``.
     skip_permissions: bool = True
 
     cli_display_name: ClassVar[str] = "deveco CLI"
@@ -66,5 +67,6 @@ class DevEcoExplorer(BaseCliAgentExplorer):
             str(self.repo_root.resolve()),
         ]
         if self.skip_permissions:
+            cmd.insert(2, "--auto")
             cmd.append("--dangerously-skip-permissions")
         return cmd

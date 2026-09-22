@@ -780,18 +780,32 @@ def extract_usage(obj: Any) -> TokenUsage:
     return usage
 
 
-def extract_usage_from_jsonl(raw: str) -> TokenUsage | None:
-    """Scan newline-delimited JSON events (agent CLI stdout) for usage."""
-    usage = TokenUsage()
-    found = False
+def iter_events(raw: str | None) -> Iterator[dict]:
+    """Yield the JSON objects of a newline-delimited event stream.
+
+    Top-level arrays yield their object items. Blank lines, malformed JSON
+    and non-object items are skipped, so one malformed line never discards
+    the rest of the stream.
+    """
     for line in (raw or "").splitlines():
-        line = line.strip()
-        if not line or not line.startswith(("{", "[")):
+        line = line.strip().lstrip("\ufeff").strip()
+        if not line.startswith(("{", "[")):
             continue
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if isinstance(event, dict):
+            yield event
+        elif isinstance(event, list):
+            yield from (item for item in event if isinstance(item, dict))
+
+
+def extract_usage_from_jsonl(raw: str) -> TokenUsage | None:
+    """Scan newline-delimited JSON events (agent CLI stdout) for usage."""
+    usage = TokenUsage()
+    found = False
+    for event in iter_events(raw):
         part = extract_usage(event)
         if part.has_any():
             usage.add(part)

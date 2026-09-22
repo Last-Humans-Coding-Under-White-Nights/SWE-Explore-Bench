@@ -172,6 +172,14 @@ docstring documents ordering, traversal, and configuration overrides.
 
 Agent explorers can be routed through one OpenAI-compatible endpoint with `--academic-api-base`, `--academic-api-key`, and `--academic-model`; see `.env.example` and `configs/litellm_proxy.yaml`.
 
+`opencode` and `deveco` (DevEco Code, a HarmonyOS fork of OpenCode) take a
+config directory via `--opencode-config-dir` / `--deveco-config-dir`.
+Credential-free, read-only example profiles for ArkTS projects, with semantic
+navigation over MCP switchable on and off, are committed under
+[`configs/cli_agents/`](configs/cli_agents/README.md) together with the
+supported CLI versions, an end-to-end test on the handwritten ArkTS fixture,
+and an opt-in smoke test against the real binaries.
+
 The optional `codenib` explorer runs
 [CodeNib](https://github.com/sysevol-ai/CodeNib)'s native repository explorer.
 The default `bm25` policy is the measured, low-dependency compatibility control:

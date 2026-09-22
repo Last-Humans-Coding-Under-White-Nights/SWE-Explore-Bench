@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from explorers.base import ExplorerResult
 from explorers.opencode import OpenCodeExplorer
-from explorers.parsing import _resolve_repo_path, parse_relevant_files
+from explorers.parsing import iter_events, _resolve_repo_path, parse_relevant_files
 
 
 class RelevantFilesTest(unittest.TestCase):
@@ -271,3 +271,31 @@ class RelevantFilesTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class IterEventsTest(unittest.TestCase):
+    """One JSON-lines reader serves the answer extractor, the usage scanner
+    and the tests, so all three see the same events."""
+
+    def test_yields_only_json_objects(self):
+        raw = "\n".join([
+            "banner line",
+            '{"type": "text", "part": {"text": "hi"}}',
+            "[1, 2]",
+            "{not json",
+            "   ",
+            ' {"type": "step_finish"} ',
+        ])
+        self.assertEqual(
+            list(iter_events(raw)),
+            [{"type": "text", "part": {"text": "hi"}}, {"type": "step_finish"}],
+        )
+
+    def test_bom_and_array_events_are_retained(self):
+        raw = '\ufeff {"type": "step_start"}\n[{"type": "text"}, 1, null]'
+        self.assertEqual(list(iter_events(raw)),
+                         [{"type": "step_start"}, {"type": "text"}])
+
+    def test_empty_and_none_input_yield_nothing(self):
+        self.assertEqual(list(iter_events("")), [])
+        self.assertEqual(list(iter_events(None)), [])
