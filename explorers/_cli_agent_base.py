@@ -2,17 +2,28 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import ClassVar, List
+from typing import Any, ClassVar, List
 
-from .base import Explorer, ExplorerResult
+from .base import (
+    BINARY_NOT_FOUND,
+    ERROR,
+    INVALID_OUTPUT,
+    PROVIDER_ERROR,
+    TIMEOUT,
+    Explorer,
+    ExplorerFailure,
+    ExplorerResult,
+)
 from .parsing import (
     TokenUsage,
     extract_usage_from_jsonl,
@@ -113,6 +124,251 @@ def _extract_output_text(raw: str) -> str:
     return texts[-1]
 
 
+def _stream_errors(raw: str) -> list[str]:
+    """Messages of the ``error`` events on a ``--format json`` stream.
+
+    OpenCode reports a failed provider call as
+    ``{"type": "error", "error": {"name": ..., "data": {"message": ...}}}``,
+    with an exit code of 1 or, depending on where it failed, 0.
+
+    An agent that retried one failing call reports it once per attempt, so
+    identical messages are collapsed: the row records what went wrong, not how
+    many times the same sentence was printed.
+    """
+    messages: list[str] = []
+    for event in iter_events(raw):
+        if event.get("type") != "error":
+            continue
+        # Every other event carries its payload under `part`, and an error
+        # event is written both ways in the wild; read either, since a row
+        # that says "error event" tells nobody anything.
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        error = event.get("error") if event.get("error") is not None else part.get("error")
+        if not isinstance(error, dict):
+            message = str(error or "error event")
+        else:
+            data = error.get("data") if isinstance(error.get("data"), dict) else {}
+            text = data.get("message") or error.get("message")
+            name = error.get("name")
+            message = ": ".join(str(p) for p in (name, text) if p) or "error event"
+        if message not in messages:
+            messages.append(message)
+    return messages
+
+
+#: How many `{` positions `_first_json_object` will try before giving up, so
+#: output that is all braces and no JSON cannot make the scan quadratic.
+_JSON_SCAN_LIMIT = 64
+
+
+def _first_json_object(text: str) -> dict | None:
+    """The first complete JSON object in ``text``, ignoring what surrounds it.
+
+    A CLI prints its configuration among its own chatter: a plugin's
+    ``[plugin] loaded {foo}`` line before it, a ``Done in 12ms`` after it.
+    Decoding the whole tail rejects the trailing line outright, and starting
+    at the first ``{`` can land in the leading one, so each candidate is
+    decoded in turn and the first that yields an object wins. A line-initial
+    ``{`` is tried first, being where a pretty-printed object starts.
+    """
+    starts = [i for i, ch in enumerate(text) if ch == "{"]
+    starts.sort(key=lambda i: not (i == 0 or text[i - 1] == "\n"))
+    decoder = json.JSONDecoder()
+    for start in starts[:_JSON_SCAN_LIMIT]:
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def _decode(stream: str | bytes | None) -> str:
+    """``TimeoutExpired`` carries raw bytes even for a ``text=True`` run."""
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream or ""
+
+
+def _output_detail(stdout_text: str, stderr_text: str) -> str:
+    """The tail of what the CLI printed, naming only the streams it used."""
+    parts = []
+    if stdout_text:
+        parts.append(f"STDOUT:\n{stdout_text[-2000:]}")
+    if stderr_text:
+        parts.append(f"STDERR:\n{stderr_text[-2000:]}")
+    return "\n".join(parts)
+
+
+# Config keys whose values are credentials. The manifest hashes the resolved
+# configuration with these replaced, so it neither holds a key nor changes
+# when one is rotated.
+_SECRET_SUFFIXES = (
+    "key", "keys", "keyid", "secret", "secrets", "password", "passwords",
+    "passwd", "passphrase", "passphrases", "token", "tokens", "credential",
+    "credentials", "cookie", "cookies", "authorization",
+)
+# ...but a key that counts something is a limit, not a credential. `maxTokens`
+# ends in `tokens` and is configuration: redacting it would hide a real change
+# to the run from the manifest. Over-redaction costs identity, not safety, so
+# this list stays short and deliberate.
+_QUANTITY_PREFIXES = ("max", "min", "num", "total", "count", "limit")
+# Names that are a credential in full but not as a suffix: `oauth` ends in
+# `auth` and names a provider block, not a secret.
+_SECRET_NAMES = frozenset({"auth"})
+# Maps whose values are handed to a process or a server verbatim; only their
+# names are kept.
+_OPAQUE_MAPS = {"environment", "env", "headers"}
+REDACTED = "<redacted>"
+
+
+def _is_secret_key(key: str) -> bool:
+    # apiKey, api_keys, accessKeyId, accessToken, password, auth — but not
+    # maxTokens, keybinds or oauth.
+    normalized = re.sub(r"[^a-z]", "", key.lower())
+    if normalized.startswith(_QUANTITY_PREFIXES):
+        return False
+    return normalized in _SECRET_NAMES or normalized.endswith(_SECRET_SUFFIXES)
+
+
+def redact_config(node: Any, key: str = "") -> Any:
+    """``node`` with every credential-shaped value replaced by ``REDACTED``."""
+    if isinstance(node, dict):
+        if key.lower() in _OPAQUE_MAPS:
+            return {k: REDACTED for k in sorted(node)}
+        # A credential can be a whole object — `{"auth": {"data": "sk-1"}}`
+        # names the secret only at the top — so the key travels down to any
+        # child that does not name one of its own. A child that names an
+        # opaque map keeps its own name too, or the branch above could never
+        # be reached from inside a configuration.
+        return {
+            k: redact_config(v, k if _is_secret_key(k) or k.lower() in _OPAQUE_MAPS else key)
+            for k, v in node.items()
+        }
+    if isinstance(node, list):
+        # The key travels into the list too: `{"api_keys": ["sk-1", "sk-2"]}`
+        # is two credentials, and dropping the key here left them in the clear.
+        return [redact_config(v, key) for v in node]
+    # Credentials are strings. A number or a flag under a credential-shaped
+    # key (`"tokens": 4096`) is a setting, and hiding it would keep a real
+    # change to the run out of the manifest.
+    return REDACTED if isinstance(node, str) and _is_secret_key(key) else node
+
+
+def _sha256_json(value: Any) -> str:
+    canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+#: Directory names a profile digest walks past: an installed dependency tree
+#: is the CLI's own doing, not the configuration it was given.
+_UNHASHED_DIRS = frozenset({"node_modules", ".git", "__pycache__"})
+#: File names a profile digest ignores: metadata the desktop writes on its
+#: own, and the `.git` file a work tree or submodule carries, which holds
+#: this machine's path to the real git directory. Opening the profile in
+#: Finder, or keeping it in a work tree, would otherwise change its hash and
+#: make the next --resume report a configuration that nobody changed. Only
+#: these exact names, not every dotfile — a profile's own `.env` or
+#: `.serena/project.yml` is configuration and has to count.
+_UNHASHED_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", ".git"})
+#: A profile is a directory the CLI also writes to: OpenCode installs plugin
+#: dependencies into it on first use and drops a `.gitignore` naming what it
+#: generated. Those names are the CLI's own statement about which files are
+#: not the configuration, so the digest takes it at its word — otherwise the
+#: first run makes every later `--resume` refuse over files nobody edited.
+_PROFILE_IGNORE_FILE = ".gitignore"
+
+
+def _generated_names(root: Path) -> frozenset[str]:
+    """Names the profile's own `.gitignore` says the CLI generated.
+
+    Plain names only, which is all these files use (`node_modules`,
+    `package.json`, `bun.lock`); a pattern with a slash or a wildcard in it
+    is left to count, since it is not one of those.
+    """
+    try:
+        text = (root / _PROFILE_IGNORE_FILE).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return frozenset()
+    names = {_PROFILE_IGNORE_FILE}
+    for line in text.splitlines():
+        entry = line.strip().rstrip("/")
+        if not entry or entry.startswith("#") or entry.startswith("!"):
+            continue
+        if "/" in entry or "*" in entry or "?" in entry or "[" in entry:
+            continue
+        names.add(entry)
+    return frozenset(names)
+
+
+def _sha256_file(path: Path) -> bytes:
+    """Digest of one file, read in blocks rather than whole."""
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.digest()
+
+
+def _sha256_tree(root: Path) -> str | None:
+    """Digest of every file under ``root`` by relative path and content.
+
+    A JSON file is hashed through `redact_config`, not as bytes: a profile
+    may carry an inline credential, and hashing it raw would make rotating
+    that credential look like a different configuration and block a resume —
+    the opposite of what the manifest promises. A file that does not parse as
+    JSON is hashed as bytes.
+
+    Skips `_UNHASHED_DIRS` and whatever the profile's own `.gitignore` names:
+    OpenCode installs its plugins into the profile on first use, some 61 MB of
+    `node_modules` with a lockfile beside it, and hashing what it generated
+    would both cost seconds of I/O per run and make the next `--resume` refuse
+    over a configuration nobody changed.
+    """
+    if not root.is_dir():
+        return None
+    skipped = _UNHASHED_FILES | _generated_names(root)
+    paths = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _UNHASHED_DIRS and d not in skipped]
+        for name in filenames:
+            if name in skipped:
+                continue
+            path = Path(dirpath) / name
+            # `os.walk` lists a dangling symlink among the files; opening it
+            # raises, and a profile is not worth crashing a run's startup for.
+            # `is_file` follows the link and is False when it leads nowhere.
+            if path.is_file():
+                paths.append(path)
+    digest = hashlib.sha256()
+    for path in sorted(paths):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        digest.update(_sha256_redacted(path))
+    return digest.hexdigest()
+
+
+#: Stands in for a profile file that could not be read at all.
+_UNREADABLE = hashlib.sha256(b"<unreadable>").digest()
+
+
+def _sha256_redacted(path: Path) -> bytes:
+    """Digest of one profile file, with any credential in it redacted."""
+    if path.suffix.lower() == ".json":
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            pass
+        else:
+            return bytes.fromhex(_sha256_json(redact_config(parsed)))
+    try:
+        return _sha256_file(path)
+    except OSError:
+        # Unreadable permissions, or removed between the walk and the read:
+        # the profile still gets a digest rather than aborting the run.
+        return _UNREADABLE
+
+
 @dataclass
 class BaseCliAgentExplorer(Explorer):
     """Template-method base for explorers that drive a coding-agent CLI."""
@@ -122,6 +378,10 @@ class BaseCliAgentExplorer(Explorer):
     timeout: int = 2400
     config_dir: Path | None = None
     prompt_additions: str = ""
+    #: ``provider/model`` sent as ``--model``; empty leaves it to the config.
+    model: str = ""
+    #: Agent sent as ``--agent``; empty leaves it to the config.
+    agent: str = ""
 
     # ── subclass hooks ──
     cli_display_name: ClassVar[str] = "CLI agent"
@@ -129,6 +389,10 @@ class BaseCliAgentExplorer(Explorer):
     config_filename: ClassVar[str] = ""
     install_hint: ClassVar[str] = ""
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
+    #: The agent the CLI runs when none is named and the configuration sets
+    #: no default. Its model outranks the top-level one just as a named
+    #: agent's does, so the manifest has to know it exists.
+    implicit_agent: ClassVar[str | None] = None
 
     config_override_vars: ClassVar[tuple[str, ...]] = ()
     session_usage_query: ClassVar[str | None] = None
@@ -136,6 +400,144 @@ class BaseCliAgentExplorer(Explorer):
     def build_cmd(self) -> list[str]:
         """Return the argv for one run. The prompt is delivered on stdin."""
         raise NotImplementedError
+
+    def _selection_args(self) -> list[str]:
+        """``--model`` / ``--agent`` for the selections made explicitly."""
+        args = []
+        if self.model:
+            args += ["--model", self.model]
+        if self.agent:
+            args += ["--agent", self.agent]
+        return args
+
+    # ── run manifest ──
+
+    def _probe(self, args: list[str], env: dict[str, str], cwd: str) -> str | None:
+        """Stdout of a short side command, or None if it could not run.
+
+        A missing binary is not "could not run": it is a run that cannot
+        produce a single result, and `describe()` learns it at startup, so it
+        is raised rather than logged. Every other failure leaves the field
+        unknown — see `describe()`.
+        """
+        try:
+            proc = subprocess.run(
+                [self.bin_path, *args],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                env=env,
+                cwd=cwd,
+            )
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                f"{self.cli_display_name} not found at {self.bin_path!r}. "
+                f"{self.install_hint}".strip()
+            ) from exc
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _log(f"{self.cli_display_name}: `{' '.join(args)}` failed: {exc}", "info")
+            return None
+        if proc.returncode != 0:
+            _log(
+                f"{self.cli_display_name}: `{' '.join(args)}` rc={proc.returncode} "
+                f"stderr={(proc.stderr or '')[-300:]!r}",
+                "info",
+            )
+            return None
+        return proc.stdout
+
+    def _profile_config(self) -> dict | None:
+        if self.config_dir is None:
+            return None
+        try:
+            data = json.loads(
+                (self.config_dir / self.config_filename).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def describe(self) -> dict[str, Any]:
+        """What configuration this explorer runs with, for the run manifest.
+
+        The CLI merges its configuration from several sources, so the profile
+        file alone does not pin it down: this asks the CLI for the resolved
+        configuration (``debug config``) under the same isolated home a case
+        runs in, and records a hash of it with every credential redacted. No
+        value in the result is a secret.
+
+        ``--pure`` resolves the configuration without plugins, so a plugin's
+        config hook is not in ``resolved_config_sha256`` even though a run
+        would load it. The shipped profiles have no plugins; a profile that
+        gains one is identified by ``profile_sha256`` instead.
+
+        A probe that fails for any reason other than a missing binary — a
+        timeout on a loaded machine, a CLI that has no ``debug config`` —
+        leaves its field ``None``, which means *unknown*, not *absent*.
+        `_manifest_diff` treats it as unknown too, so one slow startup does
+        not refuse every later resume.
+        """
+        version = resolved = None
+        with tempfile.TemporaryDirectory(prefix="cli-agent-home-") as tmp_home:
+            env = dict(os.environ)
+            self._isolate_env(env, Path(tmp_home))
+            self._prepare_config(env)
+            # An empty cwd: a checkout's own project config is not part of
+            # the configuration the run was given.
+            workdir = Path(tmp_home) / "workdir"
+            workdir.mkdir()
+            stdout = self._probe(["--version"], env, str(workdir))
+            if stdout is not None:
+                version = stdout.strip() or None
+            stdout = self._probe(["debug", "config", "--pure"], env, str(workdir))
+            if stdout is not None:
+                resolved = _first_json_object(stdout)
+        # `resolved or ...` would discard a configuration that resolves to {}.
+        config = resolved if resolved is not None else self._profile_config() or {}
+        # An agent may name its own model, and it outranks the top-level one:
+        # pinning the global model on the command line would otherwise
+        # override the agent's choice. That holds for the agent the CLI falls
+        # back to as much as for one `--agent` named, so `implicit_agent` is
+        # resolved last but consulted all the same.
+        agent = self.agent or config.get("default_agent") or self.implicit_agent or None
+        agents = config.get("agent") if isinstance(config.get("agent"), dict) else {}
+        agent_config = agents.get(agent) if isinstance(agents.get(agent), dict) else {}
+        agent_model = agent_config.get("model") or None
+        model = self.model or agent_model or config.get("model") or None
+        if self.model:
+            model_source = "flag"
+        elif agent_model:
+            model_source = "agent"
+        else:
+            model_source = "config" if model else None
+        # `{}` is "the CLI answered, and no server is configured"; `None` is
+        # "the CLI did not answer", which is not the same thing and must not
+        # read as a configuration change on the next resume.
+        mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
+        return {
+            "cli": self.cli_display_name,
+            "cli_version": version,
+            "model": model,
+            "model_source": model_source,
+            "agent": agent,
+            "prompt_sha256": hashlib.sha256(
+                f"{self.prompt_template}\0{self.prompt_additions}".encode("utf-8")
+            ).hexdigest(),
+            "profile_sha256": (
+                _sha256_tree(self.config_dir) if self.config_dir is not None else None
+            ),
+            "resolved_config_sha256": (
+                _sha256_json(redact_config(resolved)) if resolved is not None else None
+            ),
+            "mcp_servers": None if resolved is None else {
+                name: {"type": server.get("type"), "enabled": server.get("enabled", True)}
+                for name, server in sorted(mcp.items())
+                if isinstance(server, dict)
+            },
+        }
 
     def _collect_usage(self, stdout_text: str, env: dict[str, str]) -> TokenUsage | None:
         """Token usage of the finished run; called before the temp home is removed."""
@@ -299,6 +701,7 @@ class BaseCliAgentExplorer(Explorer):
             self._prepare_config(env)
             seeded = self._seed_checkout()
 
+            returncode: int | None = None
             try:
                 completed = subprocess.run(
                     cmd,
@@ -313,52 +716,84 @@ class BaseCliAgentExplorer(Explorer):
                 )
             except FileNotFoundError:
                 _log(f"{self.cli_display_name} {instance_id}: binary not found")
-                raise RuntimeError(
-                    f"{self.cli_display_name} not found. {self.install_hint}".strip()
+                raise ExplorerFailure(
+                    BINARY_NOT_FOUND,
+                    f"{self.cli_display_name} not found. {self.install_hint}".strip(),
                 )
-            except subprocess.TimeoutExpired:
-                _log(
-                    f"{self.cli_display_name} {instance_id}: timed out "
-                    f"after {self.timeout}s"
-                )
-                raise RuntimeError(
-                    f"{self.cli_display_name} timed out after {self.timeout}s"
-                )
+            except subprocess.TimeoutExpired as exc:
+                # What the CLI printed before it was killed holds the usage
+                # events and the reason it stalled; keep it.
+                stdout_text, stderr_text = _decode(exc.stdout), _decode(exc.stderr)
+            else:
+                returncode = completed.returncode
+                stdout_text, stderr_text = completed.stdout or "", completed.stderr or ""
             finally:
                 self._unseed_checkout(seeded)
 
-            stderr_text = completed.stderr or ""
-            stdout_text = completed.stdout or ""
             tail = f" stderr_tail={stderr_text[-300:]!r}" if stderr_text else ""
+            status = "timed out" if returncode is None else f"rc={returncode}"
             _log(
-                f"{self.cli_display_name} {instance_id}: rc={completed.returncode} "
+                f"{self.cli_display_name} {instance_id}: {status} "
                 f"in {time.perf_counter() - proc_t0:.1f}s "
                 f"(stdout={len(stdout_text)}B stderr={len(stderr_text)}B){tail}"
             )
             usage = self._collect_usage(stdout_text, env)
 
-        output = _extract_output_text(stdout_text)
-        # Best-effort: report token usage before the rc check below can
-        # raise, so failed-but-expensive runs still hand their spend to the
-        # collector (see _eval_one).
+        # Report token usage before any failure below is raised, so a failed
+        # but expensive run still hands its spend to the collector.
         report_usage(usage)
-
-        if completed.returncode != 0:
-            stdout_preview = (completed.stdout or "")[-2000:]
-            stderr_preview = (completed.stderr or "")[-2000:]
-            detail = stderr_preview
-            if stdout_preview:
-                detail = f"STDOUT:\n{stdout_preview}\nSTDERR:\n{stderr_preview}"
-            raise RuntimeError(
-                f"{self.cli_display_name} failed (rc={completed.returncode}):\n{detail}"
-            )
-
-        if not output:
-            return []
+        # The streams are the agent's raw output — model text among the
+        # events — so they go to the log, never into a result row that may
+        # be published. A row carries the classified message instead.
         _log(
-            f"{self.cli_display_name} {instance_id}: agent output:\n{output}",
+            f"{self.cli_display_name} {instance_id}: output\n"
+            f"{_output_detail(stdout_text, stderr_text)}",
             level="trace",
         )
-        return parse_relevant_files(
-            output, instance_id, top_k=top_k, repo_path=self.repo_root,
+
+        if returncode is None:
+            raise ExplorerFailure(
+                TIMEOUT, f"{self.cli_display_name} timed out after {self.timeout}s"
+            )
+        if returncode != 0:
+            # A non-zero exit says the run failed, not whose fault it was: a
+            # bad flag and a refused API key both land here. The provider is
+            # only named when the stream says so.
+            errors = _stream_errors(stdout_text)
+            if errors:
+                raise ExplorerFailure(
+                    PROVIDER_ERROR,
+                    f"{self.cli_display_name} failed (rc={returncode}): "
+                    + "; ".join(errors),
+                )
+            raise ExplorerFailure(
+                ERROR, f"{self.cli_display_name} failed (rc={returncode})"
+            )
+
+        output = _extract_output_text(stdout_text)
+        results = []
+        if output:
+            _log(
+                f"{self.cli_display_name} {instance_id}: agent output:\n{output}",
+                level="trace",
+            )
+            results = parse_relevant_files(
+                output, instance_id, top_k=top_k, repo_path=self.repo_root,
+            )
+        # An answer that names no region is still an answer when it uses the
+        # output contract; anything else is a run that never produced one.
+        if results or ANSWER_MARKER in output:
+            return results
+        # Only reached without an answer, so the stream is parsed a second
+        # time on the one path that reads the result.
+        errors = _stream_errors(stdout_text)
+        if errors:
+            raise ExplorerFailure(
+                PROVIDER_ERROR,
+                f"{self.cli_display_name} reported errors and no answer (rc=0): "
+                + "; ".join(errors),
+            )
+        raise ExplorerFailure(
+            INVALID_OUTPUT,
+            f"{self.cli_display_name} exited cleanly without a {ANSWER_MARKER} answer",
         )

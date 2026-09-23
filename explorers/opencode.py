@@ -55,6 +55,9 @@ class OpenCodeExplorer(BaseCliAgentExplorer):
         "Install and configure the `opencode` binary, or pass --opencode-bin."
     )
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
+    #: OpenCode runs `build` when no agent is named and the
+    #: configuration sets no default (verified on 1.18.29).
+    implicit_agent: ClassVar[str | None] = "build"
 
     def build_cmd(self) -> list[str]:
         return [
@@ -65,4 +68,5 @@ class OpenCodeExplorer(BaseCliAgentExplorer):
             "json",
             "--dir",
             str(self.repo_root.resolve()),
+            *self._selection_args(),
         ]

@@ -17,13 +17,22 @@ from typing import Callable, Type
 from unittest.mock import patch
 
 from explorers._cli_agent_base import (
+    REDACTED,
     XDG_VARS,
     BaseCliAgentExplorer,
     _extract_output_text,
+    redact_config,
+)
+from explorers.base import (
+    BINARY_NOT_FOUND,
+    INVALID_OUTPUT,
+    PROVIDER_ERROR,
+    TIMEOUT,
+    ExplorerFailure,
 )
 from explorers.deveco import DevEcoExplorer
 from explorers.opencode import OpenCodeExplorer
-from explorers.parsing import parse_relevant_files
+from explorers.parsing import parse_relevant_files, usage_collector
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -130,7 +139,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
 
                     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
                         seen["env"] = kwargs["env"]
-                        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                        return subprocess.CompletedProcess(cmd, 0, stdout=ANSWER_EVENT, stderr="")
 
                     redirects = XDG_VARS + case.expected_override_vars
                     inherited = dict(os.environ, HOME="/user")
@@ -164,7 +173,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
 
                     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
                         seen["env"] = kwargs["env"]
-                        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                        return subprocess.CompletedProcess(cmd, 0, stdout=ANSWER_EVENT, stderr="")
 
                     explorer = case.explorer_cls(
                         repo_root=Path(repo),
@@ -229,7 +238,8 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         with self.assertRaisesRegex(RuntimeError, "rc=3"):
                             explorer.explore(instance_id="inst-1", query="issue")
 
-    def test_empty_stdout_returns_no_results(self) -> None:
+    def test_empty_stdout_is_invalid_output(self) -> None:
+        """A clean exit that printed nothing never answered."""
         for case in CLI_EXPLORER_CASES:
             with self.subTest(explorer=case.explorer_cls.__name__):
                 with tempfile.TemporaryDirectory() as repo:
@@ -240,9 +250,9 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                     with patch(
                         "explorers._cli_agent_base.subprocess.run", return_value=completed
                     ):
-                        self.assertEqual(
-                            explorer.explore(instance_id="inst-1", query="issue"), []
-                        )
+                        with self.assertRaises(ExplorerFailure) as caught:
+                            explorer.explore(instance_id="inst-1", query="issue")
+                    self.assertEqual(caught.exception.outcome, INVALID_OUTPUT)
 
     def test_prompt_additions_reach_the_prompt(self) -> None:
         for case in CLI_EXPLORER_CASES:
@@ -254,7 +264,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         if cmd[1] == "db":
                             return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
                         seen["input"] = kwargs["input"]
-                        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+                        return subprocess.CompletedProcess(cmd, 0, stdout=ANSWER_EVENT, stderr="")
 
                     explorer = case.explorer_cls(
                         repo_root=Path(repo), bin_path=case.bin_path,
@@ -294,6 +304,437 @@ class DevEcoInvocationTest(unittest.TestCase):
         )
 
 
+# One error event as OpenCode 1.18.29 prints it when the provider is unreachable.
+ERROR_EVENT = json.dumps({
+    "type": "error", "timestamp": 1790164155111, "sessionID": "ses_1",
+    "error": {"name": "APIError", "data": {
+        "message": "Cannot connect to API: Unable to connect.", "isRetryable": True,
+    }},
+})
+USAGE_EVENT = json.dumps({
+    "type": "step_finish",
+    "part": {"type": "step-finish", "tokens": {"input": 700, "output": 50,
+                                               "reasoning": 0, "cache": {"read": 0, "write": 0}}},
+})
+
+
+class CliAgentOutcomeTest(unittest.TestCase):
+    """Each way a run can go wrong surfaces as its own outcome, spend included."""
+
+    def _explore(self, explorer_cls, run):  # type: ignore[no-untyped-def]
+        """Run one case against ``run`` (the fake agent); the session store is empty."""
+        def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            if cmd[1] == "db":
+                return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
+            return run(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as repo:
+            explorer = explorer_cls(repo_root=Path(repo), bin_path="agent-test", timeout=5)
+            with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+                with usage_collector() as tracker:
+                    try:
+                        return explorer.explore(instance_id="inst-1", query="issue"), tracker
+                    except ExplorerFailure as exc:
+                        return exc, tracker
+
+    def _each_cli(self):  # type: ignore[no-untyped-def]
+        for cls in (OpenCodeExplorer, DevEcoExplorer):
+            with self.subTest(explorer=cls.__name__):
+                yield cls
+
+    def test_error_only_stream_with_clean_exit_is_a_provider_error(self) -> None:
+        stdout = "\n".join([USAGE_EVENT, ERROR_EVENT])
+        for cls in self._each_cli():
+            failure, tracker = self._explore(
+                cls, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout, "")
+            )
+            self.assertIsInstance(failure, ExplorerFailure)
+            self.assertEqual(failure.outcome, PROVIDER_ERROR)
+            self.assertIn("Cannot connect to API", str(failure))
+            self.assertEqual(tracker.input_tokens, 700)  # spend is kept
+
+    def test_error_stream_with_failing_exit_is_a_provider_error(self) -> None:
+        for cls in self._each_cli():
+            failure, _ = self._explore(
+                cls, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, ERROR_EVENT, "")
+            )
+            self.assertEqual(failure.outcome, PROVIDER_ERROR)
+            self.assertIn("rc=1", str(failure))
+
+    def test_text_without_an_answer_is_invalid_output(self) -> None:
+        text = json.dumps({"type": "text", "part": {"text": "I could not decide."}})
+        for cls in self._each_cli():
+            failure, _ = self._explore(
+                cls, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, text, "")
+            )
+            self.assertEqual(failure.outcome, INVALID_OUTPUT)
+
+    def test_an_answer_naming_no_region_is_an_empty_success(self) -> None:
+        text = json.dumps({"type": "text", "part": {"text": "RELEVANT_FILES:\n(none)"}})
+        for cls in self._each_cli():
+            results, _ = self._explore(
+                cls, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, text, "")
+            )
+            self.assertEqual(results, [])
+
+    def test_an_answer_despite_an_error_event_is_a_success(self) -> None:
+        stdout = "\n".join([ERROR_EVENT, ANSWER_EVENT])
+        with tempfile.TemporaryDirectory() as repo:
+            (Path(repo) / "src").mkdir()
+            (Path(repo) / "src/main.py").write_text("x\n" * 30, encoding="utf-8")
+            explorer = OpenCodeExplorer(repo_root=Path(repo), bin_path="agent-test")
+
+            def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+                out = "[]" if cmd[1] == "db" else stdout
+                return subprocess.CompletedProcess(cmd, 0, out, "")
+
+            with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+                results = explorer.explore(instance_id="inst-1", query="issue")
+        self.assertEqual(results[0].regions[0].path, "src/main.py")
+
+    def test_timeout_keeps_the_usage_but_not_the_raw_output(self) -> None:
+        """The spend is in what the CLI printed before the kill; the row is not."""
+        partial = (USAGE_EVENT + "\n" + json.dumps(
+            {"type": "text", "part": {"text": "still reading render.py"}}
+        )).encode("utf-8")
+
+        def times_out(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            # subprocess.run hands back raw bytes on a timeout, even with text=True.
+            raise subprocess.TimeoutExpired(cmd, 5, output=partial, stderr=b"slow provider")
+
+        for cls in self._each_cli():
+            failure, tracker = self._explore(cls, times_out)
+            self.assertEqual(failure.outcome, TIMEOUT)
+            self.assertTrue(str(failure).endswith("timed out after 5s"), str(failure))
+            # The streams are still read — that is where the usage is — but
+            # the agent's own text stays out of a row that may be published.
+            self.assertNotIn("still reading render.py", str(failure))
+            self.assertNotIn("slow provider", str(failure))
+            self.assertEqual(tracker.input_tokens, 700)
+
+    def test_repeated_error_events_are_reported_once(self) -> None:
+        """A retried call prints its error per attempt; the row says it once."""
+        repeated = "\n".join([ERROR_EVENT] * 4)
+        for cls in self._each_cli():
+            failure, _ = self._explore(
+                cls, lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, repeated, "")
+            )
+            self.assertIsInstance(failure, ExplorerFailure)
+            self.assertEqual(failure.outcome, PROVIDER_ERROR)
+            self.assertEqual(str(failure).count("Cannot connect to API"), 1)
+
+    def test_missing_binary_is_binary_not_found(self) -> None:
+        def missing(cmd, **kwargs):  # type: ignore[no-untyped-def]
+            raise FileNotFoundError(cmd[0])
+
+        for cls in self._each_cli():
+            failure, _ = self._explore(cls, missing)
+            self.assertEqual(failure.outcome, BINARY_NOT_FOUND)
+
+
+class CliAgentSelectionTest(unittest.TestCase):
+    """The model and agent are named on the command line, not left implicit."""
+
+    def test_model_and_agent_reach_the_argv(self) -> None:
+        for cls in (OpenCodeExplorer, DevEcoExplorer):
+            with self.subTest(explorer=cls.__name__):
+                cmd = cls(repo_root=Path("."), model="p/m", agent="explore").build_cmd()
+                self.assertEqual(cmd[cmd.index("--model") + 1], "p/m")
+                self.assertEqual(cmd[cmd.index("--agent") + 1], "explore")
+
+    def test_no_selection_adds_no_flags(self) -> None:
+        cmd = OpenCodeExplorer(repo_root=Path(".")).build_cmd()
+        self.assertNotIn("--model", cmd)
+        self.assertNotIn("--agent", cmd)
+
+
+class CliAgentDescribeTest(unittest.TestCase):
+    """The manifest entry pins the configuration without recording a secret."""
+
+    SECRET = "sk-live-0123456789abcdef"
+
+    def _resolved(self, api_key: str, model: str = "swe-explore/gpt-5.4") -> dict:
+        return {
+            "model": model,
+            "provider": {"swe-explore": {"options": {
+                "baseURL": "http://127.0.0.1:4000/v1", "apiKey": api_key,
+            }}},
+            "mcp": {
+                "serena": {"type": "local", "enabled": True,
+                           "environment": {"SERENA_HOME": "/home/me/.serena"}},
+                "off": {"type": "remote", "enabled": False,
+                        "headers": {"Authorization": f"Bearer {api_key}"}},
+            },
+        }
+
+    def _describe(self, resolved: dict, **kwargs) -> tuple[dict, list[list[str]]]:  # type: ignore[no-untyped-def]
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kw):  # type: ignore[no-untyped-def]
+            calls.append(cmd)
+            if cmd[1:] == ["--version"]:
+                return subprocess.CompletedProcess(cmd, 0, "1.18.29\n", "")
+            return subprocess.CompletedProcess(cmd, 0, json.dumps(resolved, indent=2), "")
+
+        explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test", **kwargs)
+        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+            return explorer.describe(), calls
+
+    def test_describe_records_the_resolved_configuration(self) -> None:
+        described, calls = self._describe(self._resolved(self.SECRET))
+        self.assertEqual(described["cli_version"], "1.18.29")
+        self.assertEqual(described["model"], "swe-explore/gpt-5.4")
+        self.assertEqual(described["model_source"], "config")
+        self.assertEqual(described["mcp_servers"], {
+            "off": {"type": "remote", "enabled": False},
+            "serena": {"type": "local", "enabled": True},
+        })
+        self.assertIsNotNone(described["resolved_config_sha256"])
+        self.assertIsNotNone(described["prompt_sha256"])
+        self.assertIn(["oc-test", "debug", "config", "--pure"], calls)
+
+    def test_describe_holds_no_secret_and_ignores_key_rotation(self) -> None:
+        first, _ = self._describe(self._resolved(self.SECRET))
+        rotated, _ = self._describe(self._resolved("sk-live-rotated"))
+        self.assertNotIn(self.SECRET, json.dumps(first))
+        self.assertEqual(first, rotated)
+
+    def test_describe_tells_models_and_prompts_apart(self) -> None:
+        base, _ = self._describe(self._resolved(self.SECRET))
+        other, _ = self._describe(self._resolved(self.SECRET, model="swe-explore/glm-5"))
+        flagged, _ = self._describe(self._resolved(self.SECRET), model="p/pinned")
+        prompted, _ = self._describe(self._resolved(self.SECRET), prompt_additions="Be brief.")
+        self.assertNotEqual(base["resolved_config_sha256"], other["resolved_config_sha256"])
+        self.assertEqual((flagged["model"], flagged["model_source"]), ("p/pinned", "flag"))
+        self.assertNotEqual(base["prompt_sha256"], prompted["prompt_sha256"])
+
+    def test_the_selected_agents_model_outranks_the_global_one(self) -> None:
+        """Pinning the global model would override what --agent selected."""
+        resolved = self._resolved(self.SECRET)
+        resolved["agent"] = {"probe": {"model": "swe-explore/special"}}
+        described, _ = self._describe(resolved, agent="probe")
+        self.assertEqual(described["agent"], "probe")
+        self.assertEqual(described["model"], "swe-explore/special")
+        self.assertEqual(described["model_source"], "agent")
+        # --model still wins over both.
+        flagged, _ = self._describe(resolved, agent="probe", model="p/pinned")
+        self.assertEqual((flagged["model"], flagged["model_source"]), ("p/pinned", "flag"))
+        # An agent that names no model falls back to the global one.
+        plain, _ = self._describe(resolved, agent="other")
+        self.assertEqual((plain["model"], plain["model_source"]),
+                         ("swe-explore/gpt-5.4", "config"))
+
+    def test_the_implicit_default_agents_model_outranks_the_global_one(self) -> None:
+        """With no agent named, the CLI still runs one, and its model wins."""
+        resolved = self._resolved(self.SECRET)
+        resolved["agent"] = {"build": {"model": "swe-explore/agent-default"}}
+        described, _ = self._describe(resolved)
+        self.assertEqual(described["agent"], "build")
+        self.assertEqual(described["model"], "swe-explore/agent-default")
+        self.assertEqual(described["model_source"], "agent")
+        # An explicitly named agent still takes precedence over the implicit one.
+        resolved["agent"]["probe"] = {"model": "swe-explore/probe"}
+        named, _ = self._describe(resolved, agent="probe")
+        self.assertEqual(named["model"], "swe-explore/probe")
+        # And a configuration whose agent names no model is unaffected.
+        plain, _ = self._describe(self._resolved(self.SECRET))
+        self.assertEqual((plain["model"], plain["model_source"]),
+                         ("swe-explore/gpt-5.4", "config"))
+
+    def test_profile_hash_ignores_a_rotated_key_but_not_a_real_change(self) -> None:
+        """A profile may hold an inline credential; rotating it must not
+        look like a different configuration (README "Run manifest")."""
+        def profile_hash(api_key: str, model: str = "m/one") -> str | None:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "opencode.json").write_text(
+                    json.dumps({"model": model, "provider": {"p": {"options": {
+                        "apiKey": api_key}}}}),
+                    encoding="utf-8",
+                )
+                (root / "notes.txt").write_text("not json", encoding="utf-8")
+                described, _ = self._describe(
+                    self._resolved(self.SECRET), config_dir=root
+                )
+                return described["profile_sha256"]
+
+        self.assertIsNotNone(profile_hash("sk-one"))
+        self.assertEqual(profile_hash("sk-one"), profile_hash("sk-rotated"))
+        self.assertNotEqual(profile_hash("sk-one"), profile_hash("sk-one", model="m/two"))
+
+    def test_trailing_output_after_the_config_is_tolerated(self) -> None:
+        """A plugin's "Done in 12ms" line must not cost us the configuration."""
+        resolved = self._resolved(self.SECRET)
+
+        def fake_run(cmd, **kw):  # type: ignore[no-untyped-def]
+            if cmd[1:] == ["--version"]:
+                return subprocess.CompletedProcess(cmd, 0, "1.18.29\n", "")
+            noisy = f"reading config\n{json.dumps(resolved)}\nDone in 12ms\n"
+            return subprocess.CompletedProcess(cmd, 0, noisy, "")
+
+        explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")
+        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+            described = explorer.describe()
+        clean, _ = self._describe(resolved)
+        self.assertEqual(described["model"], "swe-explore/gpt-5.4")
+        self.assertEqual(described["mcp_servers"], clean["mcp_servers"])
+        self.assertEqual(
+            described["resolved_config_sha256"], clean["resolved_config_sha256"]
+        )
+
+    def test_profile_hash_ignores_desktop_metadata_files(self) -> None:
+        """Opening the profile in Finder must not look like a config change."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            (root / ".DS_Store").write_bytes(b"\x00\x01finder")
+            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            # A dotfile that is real configuration still counts.
+            (root / ".env").write_text("MODE=fast\n", encoding="utf-8")
+            with_env, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
+        self.assertNotEqual(before["profile_sha256"], with_env["profile_sha256"])
+
+    def test_profile_hash_skips_installed_dependency_trees(self) -> None:
+        """node_modules is pinned by the lockfile and is not read."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            deps = root / "node_modules" / "pkg"
+            deps.mkdir(parents=True)
+            (deps / "index.js") .write_text("module.exports = 1", encoding="utf-8")
+            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            (deps / "index.js").write_text("module.exports = 2", encoding="utf-8")
+            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
+
+    def test_profile_hash_skips_what_the_cli_generated(self) -> None:
+        """OpenCode installs plugins into the profile and lists what it wrote."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            # What `opencode` writes on first use, `.gitignore` included.
+            (root / ".gitignore").write_text(
+                "node_modules\npackage.json\npackage-lock.json\nbun.lock\n",
+                encoding="utf-8",
+            )
+            (root / "package.json").write_text('{"dependencies": {}}', encoding="utf-8")
+            (root / "bun.lock").write_text("lockfile v1", encoding="utf-8")
+            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            # A file it did not generate still counts.
+            (root / "plugin.json").write_text('{"on": "chat"}', encoding="utf-8")
+            with_plugin, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
+        self.assertNotEqual(before["profile_sha256"], with_plugin["profile_sha256"])
+
+    def test_profile_hash_ignores_the_git_file_of_a_work_tree(self) -> None:
+        """In a work tree `.git` is a file holding this machine's path."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            (root / ".git").write_text(
+                "gdir: /Users/someone/checkouts/bench/.git/worktrees/w1\n",
+                encoding="utf-8",
+            )
+            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
+
+    def test_a_dangling_symlink_in_the_profile_does_not_crash_the_run(self) -> None:
+        """os.walk lists a broken link among the files; opening it raises."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            os.symlink(str(root / "never-created.json"), str(root / "dangling"))
+            described, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertIsNotNone(described["profile_sha256"])
+
+    def test_config_is_found_among_the_cli_s_own_chatter(self) -> None:
+        """A brace in a log line before the object must not be mistaken for it."""
+        resolved = self._resolved(self.SECRET)
+        noisy = f"[plugin] loaded {{foo}}\n{json.dumps(resolved)}\nDone in 12ms\n"
+
+        def fake_run(cmd, **kw):  # type: ignore[no-untyped-def]
+            if cmd[1:] == ["--version"]:
+                return subprocess.CompletedProcess(cmd, 0, "1.18.29\n", "")
+            return subprocess.CompletedProcess(cmd, 0, noisy, "")
+
+        explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")
+        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+            described = explorer.describe()
+        clean, _ = self._describe(resolved)
+        self.assertEqual(described["model"], "swe-explore/gpt-5.4")
+        self.assertEqual(
+            described["resolved_config_sha256"], clean["resolved_config_sha256"]
+        )
+
+    def test_redaction_reaches_plural_keys_and_list_values(self) -> None:
+        redacted = redact_config({
+            "api_keys": ["sk-1", "sk-2"], "access_tokens": "t", "secrets": ["s"],
+            "cookies": "c", "maxTokens": 4096, "numKeys": 2, "keybinds": {"a": "b"},
+        })
+        self.assertEqual(redacted, {
+            "api_keys": [REDACTED, REDACTED], "access_tokens": REDACTED,
+            "secrets": [REDACTED], "cookies": REDACTED,
+            # A key that counts something is a limit, and still identifies a run.
+            "maxTokens": 4096, "numKeys": 2, "keybinds": {"a": "b"},
+        })
+
+    def test_redaction_keeps_limits_and_drops_credentials(self) -> None:
+        redacted = redact_config({
+            "apiKey": "k", "api_key": "k", "accessToken": "t", "password": "p",
+            "maxTokens": 4096, "keybinds": {"leader": "ctrl+x"},
+            "headers": {"Authorization": "Bearer t"},
+        })
+        self.assertEqual(redacted, {
+            "apiKey": REDACTED, "api_key": REDACTED, "accessToken": REDACTED,
+            "password": REDACTED, "maxTokens": 4096, "keybinds": {"leader": "ctrl+x"},
+            "headers": {"Authorization": REDACTED},
+        })
+
+    def test_redaction_reaches_a_credential_object(self) -> None:
+        """A secret named only by its parent key was left in the clear."""
+        redacted = redact_config({
+            "credentials": {"data": "sk-live-1", "client_id": "acme", "n": 2},
+            "provider": {"fake": {"options": {"apiKey": "sk-live-2"}}},
+        })
+        self.assertEqual(redacted, {
+            "credentials": {"data": REDACTED, "client_id": REDACTED, "n": 2},
+            "provider": {"fake": {"options": {"apiKey": REDACTED}}},
+        })
+
+    def test_redaction_keeps_numbers_and_flags_under_credential_names(self) -> None:
+        """Only a string is a credential; a count is configuration."""
+        redacted = redact_config({"tokens": 4096, "keys": 12, "cache_key": True})
+
+        self.assertEqual(redacted, {"tokens": 4096, "keys": 12, "cache_key": True})
+
+    def test_redaction_reaches_an_opaque_map_inside_the_configuration(self) -> None:
+        """`environment` and `headers` are handed over verbatim, wherever they sit."""
+        redacted = redact_config({
+            "mcp": {"serena": {"environment": {"SERENA_HOME": "/srv", "TOKEN_A": "t"}}},
+            "provider": {"fake": {"headers": {"X-Tenant": "acme"}}},
+        })
+        self.assertEqual(redacted, {
+            "mcp": {"serena": {"environment": {"SERENA_HOME": REDACTED,
+                                               "TOKEN_A": REDACTED}}},
+            "provider": {"fake": {"headers": {"X-Tenant": REDACTED}}},
+        })
+
+    def test_redaction_covers_key_ids_passphrases_and_auth(self) -> None:
+        redacted = redact_config({
+            "access_key_id": "AKIA0", "passphrase": "p", "auth": "Bearer t",
+            # `oauth` names a provider block, not a secret of its own.
+            "oauth": {"issuer": "https://issuer.example", "token": "t"},
+        })
+        self.assertEqual(redacted, {
+            "access_key_id": REDACTED, "passphrase": REDACTED, "auth": REDACTED,
+            "oauth": {"issuer": "https://issuer.example", "token": REDACTED},
+        })
+
+
 def _snapshot(root: Path) -> dict[str, str]:
     """Relative path -> text for every file under ``root``."""
     return {
@@ -328,7 +769,7 @@ class CheckoutSeedingTest(unittest.TestCase):
             seen.update(_snapshot(self.repo))
             if during_run:
                 during_run()
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=ANSWER_EVENT, stderr="")
 
         explorer = OpenCodeExplorer(repo_root=self.repo, bin_path="x", config_dir=self.cfg)
         with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
