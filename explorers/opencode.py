@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from ._cli_agent_base import BaseCliAgentExplorer
+from ._cli_agent_base import SESSION_USAGE_QUERY, BaseCliAgentExplorer
 
 EXPLORE_PROMPT = """Explore this repository to find the source files and line ranges most relevant to understanding and fixing the following issue. Do NOT make any code changes.
 
@@ -47,7 +47,10 @@ class OpenCodeExplorer(BaseCliAgentExplorer):
         "OPENCODE_CONFIG",
         "OPENCODE_CONFIG_CONTENT",
         "OPENCODE_CONFIG_DIR",
+        # An absolute DB path outranks HOME, so the temp home alone won't isolate it.
+        "OPENCODE_DB",
     )
+    session_usage_query: ClassVar[str | None] = SESSION_USAGE_QUERY
     install_hint: ClassVar[str] = (
         "Install and configure the `opencode` binary, or pass --opencode-bin."
     )

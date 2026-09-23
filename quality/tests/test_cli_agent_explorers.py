@@ -87,6 +87,8 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                     seen: dict[str, object] = {}
 
                     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+                        if cmd[1] == "db":
+                            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
                         seen.update(
                             cmd=cmd, cwd=kwargs["cwd"], env=kwargs["env"],
                             input=kwargs["input"], timeout=kwargs["timeout"],
@@ -249,6 +251,8 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                     seen: dict[str, object] = {}
 
                     def fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+                        if cmd[1] == "db":
+                            return subprocess.CompletedProcess(cmd, 0, stdout="[]", stderr="")
                         seen["input"] = kwargs["input"]
                         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 

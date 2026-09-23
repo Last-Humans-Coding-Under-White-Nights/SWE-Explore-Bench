@@ -2,17 +2,19 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import ClassVar, List
 
 from .base import Explorer, ExplorerResult
 from .parsing import (
+    TokenUsage,
     extract_usage_from_jsonl,
     iter_events,
     parse_relevant_files,
@@ -43,6 +45,14 @@ Do exactly this, but without modifications. You are planner, so you just provide
 
 
 ANSWER_MARKER = "RELEVANT_FILES:"
+
+# The temp home holds only this run's sessions, sub-agents included.
+SESSION_USAGE_QUERY = (
+    "select parent_id is not null as sub, sum(tokens_input) as input,"
+    " sum(tokens_output) as output, sum(tokens_reasoning) as reasoning,"
+    " sum(tokens_cache_read) as cache_read, sum(tokens_cache_write) as cache_write"
+    " from session group by sub"
+)
 
 XDG_VARS = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
 #: Subdirectory of a profile whose files are placed into the checkout per run.
@@ -121,10 +131,63 @@ class BaseCliAgentExplorer(Explorer):
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
 
     config_override_vars: ClassVar[tuple[str, ...]] = ()
+    session_usage_query: ClassVar[str | None] = None
 
     def build_cmd(self) -> list[str]:
         """Return the argv for one run. The prompt is delivered on stdin."""
         raise NotImplementedError
+
+    def _collect_usage(self, stdout_text: str, env: dict[str, str]) -> TokenUsage | None:
+        """Token usage of the finished run; called before the temp home is removed."""
+        stream = extract_usage_from_jsonl(stdout_text)
+        if not self.session_usage_query:
+            return stream
+        # The session columns are flat; only the stdout events show whether
+        # reasoning sits beside output or inside it.
+        separate_reasoning = not (
+            stream and stream.reasoning_tokens and not stream.separate_reasoning_tokens
+        )
+        usage = None
+        try:
+            proc = subprocess.run(
+                # --pure: plugin chatter on stdout would break the JSON parse.
+                [self.bin_path, "db", "--pure", self.session_usage_query,
+                 "--format", "json"],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+                env=env,
+            )
+            usage = TokenUsage()
+            for row in json.loads(proc.stdout):
+                reasoning = int(row.get("reasoning") or 0)
+                part = TokenUsage(
+                    input_tokens=int(row.get("input") or 0),
+                    output_tokens=int(row.get("output") or 0),
+                    cache_read_tokens=int(row.get("cache_read") or 0),
+                    cache_write_tokens=int(row.get("cache_write") or 0),
+                    reasoning_tokens=reasoning,
+                    separate_reasoning_tokens=reasoning if separate_reasoning else 0,
+                )
+                if row.get("sub"):
+                    part.subagent = replace(part)
+                usage.add(part)
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError,
+                AttributeError) as exc:
+            usage, reason = None, f"{type(exc).__name__}: {exc}"
+        else:
+            reason = f"rc={proc.returncode} stderr={(proc.stderr or '')[-300:]!r}"
+        if usage is None or not usage.has_any():
+            _log(
+                f"{self.cli_display_name}: no session-store usage ({reason}); "
+                "falling back to the stdout count, which excludes sub-agents",
+                level="info",
+            )
+            return stream
+        return usage
 
     def _format_prompt(self, query: str, top_k: int) -> str:
         return self.prompt_template.format(
@@ -272,12 +335,13 @@ class BaseCliAgentExplorer(Explorer):
                 f"in {time.perf_counter() - proc_t0:.1f}s "
                 f"(stdout={len(stdout_text)}B stderr={len(stderr_text)}B){tail}"
             )
+            usage = self._collect_usage(stdout_text, env)
 
         output = _extract_output_text(stdout_text)
-        # Best-effort: collect token usage from JSON event fields. Done
-        # before the rc check below can raise, so failed-but-expensive runs
-        # still hand their spend to the collector (see _eval_one).
-        report_usage(extract_usage_from_jsonl(stdout_text))
+        # Best-effort: report token usage before the rc check below can
+        # raise, so failed-but-expensive runs still hand their spend to the
+        # collector (see _eval_one).
+        report_usage(usage)
 
         if completed.returncode != 0:
             stdout_preview = (completed.stdout or "")[-2000:]

@@ -425,6 +425,14 @@ def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
     values = totals.to_dict()
     table.add_row(str(cases), *[f"{values[key]:,}" for _, key in display])
     console.print(table)
+    # Printed even when zero: a run that used sub-agents but reports 0 here means
+    # the session-store query fell back to the stdout count.
+    sub = totals.subagent or TokenUsage()
+    console.print(
+        f"  [dim]of which sub-agents: {sub.total:,} "
+        f"(in {sub.input_tokens:,}, out {sub.output_tokens:,}, "
+        f"reasoning {sub.reasoning_tokens:,})[/dim]"
+    )
 
 
 # ── main command ────────────────────────────────────────────────────────

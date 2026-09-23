@@ -1,5 +1,10 @@
 """Tests for token-usage extraction from provider outputs."""
+import json
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
 
 from explorers.parsing import (
     TokenUsage,
@@ -8,6 +13,7 @@ from explorers.parsing import (
     report_usage,
     usage_collector,
 )
+from explorers.opencode import OpenCodeExplorer
 
 
 def test_extract_anthropic_style_usage():
@@ -229,7 +235,12 @@ def test_extract_usage_from_jsonl_empty():
 
 
 def test_token_usage_roundtrip_and_add():
-    a = TokenUsage(input_tokens=10, output_tokens=2, reasoning_tokens=3)
+    a = TokenUsage(
+        input_tokens=10,
+        output_tokens=2,
+        reasoning_tokens=3,
+        subagent=TokenUsage(input_tokens=4, output_tokens=1),
+    )
     assert a.total == 12
     assert TokenUsage(cache_read_tokens=99, cache_write_tokens=99).total == 0
     b = TokenUsage.from_dict(a.to_dict())
@@ -292,3 +303,127 @@ def test_extract_usage_from_array_event_lines():
     assert usage is not None
     assert usage.input_tokens == 19
     assert usage.output_tokens == 5
+
+
+def _collect_with_db(monkeypatch, db_stdout, stdout_text="", seen=None, env=None):
+    def fake_run(cmd, **kw):
+        if seen is not None:
+            seen.update(cmd=cmd, **kw)
+        return subprocess.CompletedProcess(cmd, 0, stdout=db_stdout)
+
+    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fake_run)
+    return OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")._collect_usage(
+        stdout_text, env={"HOME": "/tmp/isolated-home"} if env is None else env
+    )
+
+
+def test_opencode_usage_includes_subagent_sessions(monkeypatch):
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+    rows = [dict(zip(cols, (1, 2, 3, 4, 5)), sub=0), dict(zip(cols, (10, 20, 30, 40, 50)), sub=1)]
+
+    usage = _collect_with_db(monkeypatch, json.dumps(rows))
+
+    assert usage == TokenUsage(
+        input_tokens=11,
+        output_tokens=22,
+        reasoning_tokens=33,
+        separate_reasoning_tokens=33,
+        cache_read_tokens=44,
+        cache_write_tokens=55,
+        subagent=TokenUsage(
+            input_tokens=10,
+            output_tokens=20,
+            reasoning_tokens=30,
+            separate_reasoning_tokens=30,
+            cache_read_tokens=40,
+            cache_write_tokens=50,
+        ),
+    )
+    assert usage.subagent.total == 60
+    assert usage.total == 11 + 22 + 33
+
+
+@pytest.mark.parametrize(
+    "db_stdout", ['{"error": "x"}', '[{"sub": 0, "input": 0, "output": 0, "reasoning": 0, '
+                  '"cache_read": 0, "cache_write": 0}]'],
+)
+def test_opencode_usage_falls_back_to_stream(monkeypatch, db_stdout):
+    step = {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 5}}}
+
+    usage = _collect_with_db(monkeypatch, db_stdout, json.dumps(step))
+
+    assert usage == TokenUsage(input_tokens=10, output_tokens=5)
+
+
+def test_opencode_usage_query_runs_in_the_isolated_home(monkeypatch):
+    seen = {}
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+
+    _collect_with_db(monkeypatch, json.dumps([dict(zip(cols, (1, 2, 0, 0, 0)), sub=0)]), seen=seen)
+
+    assert seen["cmd"][:3] == ["oc-test", "db", "--pure"]
+    assert seen["cmd"][-2:] == ["--format", "json"]
+    assert seen["env"] == {"HOME": "/tmp/isolated-home"}
+
+
+def test_opencode_isolation_drops_inherited_db_override():
+    env = {"OPENCODE_DB": "/somewhere/else/opencode.db", "XDG_DATA_HOME": "/xdg"}
+
+    OpenCodeExplorer(repo_root=Path("."))._isolate_env(env, Path("/tmp/home"))
+
+    assert "OPENCODE_DB" not in env
+    assert env["HOME"] == str(Path("/tmp/home"))
+
+
+def test_opencode_usage_keeps_reasoning_inside_output(monkeypatch):
+    step = {"usage": {"completion_tokens": 20, "completion_tokens_details": {"reasoning_tokens": 5}}}
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+    rows = [dict(zip(cols, (100, 200, 50, 0, 0)), sub=0)]
+
+    usage = _collect_with_db(monkeypatch, json.dumps(rows), json.dumps(step))
+
+    assert usage.separate_reasoning_tokens == 0
+    assert usage.reasoning_tokens == 50
+    assert usage.total == 300
+
+
+def test_deveco_usage_queries_its_session_store(monkeypatch):
+    from explorers.deveco import DevEcoExplorer
+
+    seen = {}
+    cols = ("input", "output", "reasoning", "cache_read", "cache_write")
+    rows = [dict(zip(cols, (1, 2, 0, 0, 0)), sub=0), dict(zip(cols, (3, 4, 0, 0, 0)), sub=1)]
+
+    def fake_run(cmd, **kw):
+        seen.update(cmd=cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows))
+
+    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fake_run)
+
+    usage = DevEcoExplorer(repo_root=Path("."), bin_path="dv-test")._collect_usage("", env={})
+
+    assert seen["cmd"][:3] == ["dv-test", "db", "--pure"]
+    assert usage.total == 10
+    assert usage.subagent == TokenUsage(input_tokens=3, output_tokens=4)
+
+
+def test_subagent_breakdown_roundtrips_and_merges():
+    a = TokenUsage(input_tokens=10, output_tokens=5,
+                   subagent=TokenUsage(input_tokens=4, output_tokens=1))
+    b = TokenUsage(input_tokens=2, output_tokens=2,
+                   subagent=TokenUsage(input_tokens=1, output_tokens=1))
+
+    assert TokenUsage.from_dict(a.to_dict()) == a
+    assert a.to_dict()["subagent_total"] == 5
+
+    a.add(b)
+    assert a.subagent == TokenUsage(input_tokens=5, output_tokens=2)
+    assert a.total == 19
+    assert a.subagent.total == 7
+
+
+def test_add_keeps_subagent_none_when_neither_side_has_one():
+    a = TokenUsage(input_tokens=1)
+    a.add(TokenUsage(input_tokens=2))
+    assert a.subagent is None
+    assert TokenUsage.from_dict(a.to_dict()).subagent is None
