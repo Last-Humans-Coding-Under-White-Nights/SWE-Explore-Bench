@@ -1,4 +1,5 @@
 """Ctrl+C must abandon the queued backlog instead of draining it."""
+import os
 import signal
 import time
 
@@ -18,10 +19,14 @@ def test_queued_work_is_cancelled_not_drained():
 
 
 def test_handler_is_restored_on_exit():
-    before = signal.getsignal(signal.SIGINT)
+    signals = [signal.SIGINT]
+    if os.name == 'posix':
+        signals.extend((signal.SIGTERM, signal.SIGHUP))
+    before = {sig: signal.getsignal(sig) for sig in signals}
     with _interruptible_pool(1):
-        assert signal.getsignal(signal.SIGINT) is not before
-    assert signal.getsignal(signal.SIGINT) is before
+        for sig in signals:
+            assert signal.getsignal(sig) is not before[sig]
+    assert {sig: signal.getsignal(sig) for sig in signals} == before
 
 
 def test_second_interrupt_exits_immediately(monkeypatch):
@@ -37,3 +42,15 @@ def test_second_interrupt_exits_immediately(monkeypatch):
             handler(signal.SIGINT, None)
 
     assert exc.value.code == 130
+
+
+def test_sequential_cancellation_scope_restores_context_and_handler():
+    before = signal.getsignal(signal.SIGINT)
+    previous_event = eval_runner.cli_cancel_event.get()
+    with pytest.raises(KeyboardInterrupt):
+        with eval_runner._cli_cancellation() as cancel:
+            assert eval_runner.cli_cancel_event.get() is cancel
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+    assert cancel.is_set()
+    assert eval_runner.cli_cancel_event.get() is previous_event
+    assert signal.getsignal(signal.SIGINT) is before

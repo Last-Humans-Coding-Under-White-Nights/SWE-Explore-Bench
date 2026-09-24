@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+from ._cli_process import run_cli
 from .base import Explorer, ExplorerResult
 from .parsing import extract_usage, parse_relevant_files, report_usage
 
@@ -96,7 +97,7 @@ class ClaudeCodeExplorer(Explorer):
             env["ANTHROPIC_SMALL_FAST_MODEL"] = self.model
 
         try:
-            completed = subprocess.run(
+            completed = run_cli(
                 cmd,
                 cwd=str(self.repo_root),
                 input=prompt,
@@ -113,10 +114,10 @@ class ClaudeCodeExplorer(Explorer):
                 "Claude Code CLI not found. Install with: "
                 "npm install -g @anthropic-ai/claude-code"
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"Claude Code CLI timed out after {self.timeout}s"
-            )
+            ) from exc
 
         if not raw:
             return []

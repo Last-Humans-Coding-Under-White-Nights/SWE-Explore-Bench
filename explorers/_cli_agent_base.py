@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar, List
 
+from ._cli_process import run_cli
 from .base import (
     BINARY_NOT_FOUND,
     ERROR,
@@ -421,7 +422,7 @@ class BaseCliAgentExplorer(Explorer):
         unknown — see `describe()`.
         """
         try:
-            proc = subprocess.run(
+            proc = run_cli(
                 [self.bin_path, *args],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -551,7 +552,7 @@ class BaseCliAgentExplorer(Explorer):
         )
         usage = None
         try:
-            proc = subprocess.run(
+            proc = run_cli(
                 # --pure: plugin chatter on stdout would break the JSON parse.
                 [self.bin_path, "db", "--pure", self.session_usage_query,
                  "--format", "json"],
@@ -703,7 +704,7 @@ class BaseCliAgentExplorer(Explorer):
 
             returncode: int | None = None
             try:
-                completed = subprocess.run(
+                completed = run_cli(
                     cmd,
                     input=prompt,
                     cwd=str(self.repo_root),

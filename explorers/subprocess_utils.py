@@ -6,6 +6,7 @@ import os
 import subprocess
 from typing import Dict, List
 
+from ._cli_process import run_cli
 from ._paths import resolve_conda_exe
 
 logger = logging.getLogger(__name__)
@@ -46,32 +47,10 @@ def run_in_conda(
         merged_env["PATH"] = conda_bin + ":" + merged_env.get("PATH", "")
 
     logger.info("conda run -n %s: %s  (cwd=%s)", conda_env, " ".join(cmd), cwd)
-    # Use Popen + process group for reliable timeout (kills all descendants)
-    import signal
-    process = subprocess.Popen(
-        full_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        cwd=cwd,
-        env=merged_env,
-        start_new_session=True,  # new process group for clean kill
-        encoding="utf-8",
-        errors="replace",
+    result = run_cli(
+        full_cmd, capture_output=True, text=True, cwd=cwd, env=merged_env,
+        timeout=timeout, encoding="utf-8", errors="replace",
     )
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        # Kill entire process group (conda + all children)
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except OSError:
-            process.kill()
-        stdout, stderr = process.communicate()
-        raise subprocess.TimeoutExpired(
-            full_cmd, timeout, output=stdout, stderr=stderr)
-    result = subprocess.CompletedProcess(
-        full_cmd, process.returncode, stdout, stderr)
 
     if result.returncode != 0:
         stderr_preview = (result.stderr or "")[:2000]

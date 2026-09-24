@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+from ._cli_process import run_cli
 from .base import ContextRegion, Explorer, ExplorerResult
 from .parsing import extract_usage, parse_relevant_files, report_usage
 
@@ -70,7 +71,7 @@ class CursorAgentExplorer(Explorer):
         cmd.append(prompt)
 
         try:
-            completed = subprocess.run(
+            completed = run_cli(
                 cmd,
                 cwd=str(self.repo_root),
                 capture_output=True,
@@ -85,10 +86,10 @@ class CursorAgentExplorer(Explorer):
                 "Cursor Agent CLI not found. Install with: "
                 "curl https://cursor.com/install -fsS | bash"
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as exc:
             raise RuntimeError(
                 f"Cursor Agent CLI timed out after {self.timeout}s"
-            )
+            ) from exc
 
         if not raw:
             return []

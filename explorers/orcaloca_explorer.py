@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
+from ._cli_process import run_cli
 from .base import Explorer, ExplorerResult
 from ._paths import orcaloca_path as _default_orcaloca_path
 from .parsing import parse_orcaloca_output
@@ -55,7 +56,7 @@ class OrcaLocaExplorer(Explorer):
     def _check_docker(self):
         """Verify Docker daemon is reachable."""
         try:
-            subprocess.run(
+            run_cli(
                 ["docker", "info"],
                 capture_output=True, timeout=15, check=True,
             )
@@ -74,7 +75,7 @@ class OrcaLocaExplorer(Explorer):
         # Best-effort cleanup of any leftover container with this exact name
         # (shouldn't exist since name is unique, but harmless).
         try:
-            subprocess.run(
+            run_cli(
                 ["docker", "rm", "-f", container_name],
                 capture_output=True, timeout=30,
             )

@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+from threading import Event
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable, Iterable, List, Dict, NamedTuple
@@ -27,6 +28,7 @@ from rich.table import Table
 
 from eval import ExploreEvaluator
 from explorers._cli_agent_base import set_log_level
+from explorers._cli_process import cli_cancel_event, kill_active_cli_trees
 from explorers.base import (
     ERROR,
     NOT_ATTEMPTED,
@@ -46,25 +48,58 @@ console = Console()
 
 
 @contextlib.contextmanager
-def _interruptible_pool(workers: int):
-    """A pool that drops its queued backlog on Ctrl+C, second Ctrl+C exits at once."""
-    previous = signal.getsignal(signal.SIGINT)
+def _cli_cancellation():
+    """Share cancellation with CLI calls; a second Ctrl+C exits immediately."""
+    signals = [signal.SIGINT]
+    if os.name == "posix":
+        signals.extend((signal.SIGTERM, signal.SIGHUP))
+    previous = {sig: signal.getsignal(sig) for sig in signals}
     seen = False
+    cancel = Event()
 
     def _handler(signum, frame):
         nonlocal seen
-        if seen:
-            os._exit(130)
+        if seen or signum != signal.SIGINT:
+            kill_active_cli_trees()
+            os._exit(128 + signum)
         seen = True
         raise KeyboardInterrupt
 
-    signal.signal(signal.SIGINT, _handler)
-    pool = ThreadPoolExecutor(max_workers=workers)
+    for sig in signals:
+        signal.signal(sig, _handler)
+    token = cli_cancel_event.set(cancel)
     try:
-        yield pool
+        yield cancel
+    except BaseException:
+        cancel.set()
+        raise
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
-        signal.signal(signal.SIGINT, previous)
+        cli_cancel_event.reset(token)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+@contextlib.contextmanager
+def _interruptible_pool(workers: int):
+    """Drop queued work and stop active CLI trees when the pool is interrupted."""
+    with _cli_cancellation() as cancel:
+        pool = ThreadPoolExecutor(
+            max_workers=workers, initializer=cli_cancel_event.set, initargs=(cancel,),
+        )
+        try:
+            yield pool
+        except BaseException:
+            cancel.set()
+            raise
+        finally:
+            try:
+                pool.shutdown(wait=True, cancel_futures=True)
+            except BaseException:
+                # Set the event outside the signal handler, including when
+                # SIGINT arrives during an otherwise normal pool shutdown.
+                cancel.set()
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
 
 
 METRICS = [
@@ -1852,8 +1887,9 @@ def run(
                     for fut in as_completed(futures):
                         _consume(fut.result())
             else:
-                for rec in remaining_records:
-                    _consume(_eval_one(rec))
+                with _cli_cancellation():
+                    for rec in remaining_records:
+                        _consume(_eval_one(rec))
         except KeyboardInterrupt:
             interrupted = True
         finally:
