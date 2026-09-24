@@ -58,6 +58,15 @@ class DevEcoExplorer(BaseCliAgentExplorer):
         "Install and configure the `deveco` binary, or pass --deveco-bin."
     )
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
+    #: DevEco Code is an OpenCode fork and shares its configuration schema and
+    #: agent defaults. Only OpenCode's fallback was verified directly (1.18.29),
+    #: so this is an assumption about the fork — a cheap one: the name is used
+    #: only to read `agent.<name>.model` out of the resolved configuration, and
+    #: when it yields a model the runner names that agent on the command line
+    #: as well, so the model cannot land on a different agent. A profile that
+    #: sets no `agent.build.model`, or a fork that renamed the agent, falls
+    #: through to the top-level `model` and pins nothing.
+    implicit_agent: ClassVar[str | None] = "build"
 
     def build_cmd(self) -> list[str]:
         cmd = [
@@ -67,6 +76,7 @@ class DevEcoExplorer(BaseCliAgentExplorer):
             "json",
             "--dir",
             str(self.repo_root.resolve()),
+            *self._selection_args(),
         ]
         if self.skip_permissions:
             cmd.insert(2, "--auto")

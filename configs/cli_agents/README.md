@@ -61,6 +61,28 @@ compaction, so long explorations would hit the provider's hard limit
 instead. Edit the `models` map, its `limit`, and the `model` key together to
 evaluate another deployment.
 
+The runner names the model on every run's command line, in this order:
+`--opencode-model` / `--deveco-model` when given, otherwise the model the
+agent in effect names, otherwise the `model` this profile resolves to. The
+flag wins outright; what an agent's own model outranks is this profile's
+top-level `model`, which would otherwise override the agent the run selected
+— including the agent the CLI falls back to (`build`) when none is named.
+When the model does come from an agent, that agent is named on the command
+line too (`--agent build`), so a model chosen for one agent cannot be handed
+to whichever agent the CLI would otherwise have run. Nothing is pinned when
+the model came from the flag or from the top-level `model`, so a CLI whose
+fallback agent we have not verified keeps its own choice.
+
+The profile directory is also written to by the CLI: OpenCode installs plugin
+dependencies into it on first use and drops a `.gitignore` naming what it
+generated. `profile_sha256` skips exactly those names, so a dependency
+install is not mistaken for a configuration change.
+
+It also records the CLI version, the resolved configuration (hashed, with
+credentials redacted) and the MCP servers in a run manifest beside the
+results, and `--resume` refuses to continue results produced by a different
+configuration. See "Run manifest" in the top-level README.
+
 The explorers redirect `HOME` to an empty temporary directory for every run,
 so the user's own `~/.config/opencode` and `~/.config/deveco` are never read.
 This also hides DevEco Code's `deveco auth login` state, which is why the

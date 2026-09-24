@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from typing import Iterable, Protocol, runtime_checkable
 
@@ -21,6 +22,38 @@ class ExplorerResult:
     instance_id: str
     score: float
     regions: list[ContextRegion]
+
+
+#: How one case ended. Every result row records one; see README "Case outcomes".
+SUCCESS = "success"
+TIMEOUT = "timeout"
+PROVIDER_ERROR = "provider_error"
+INVALID_OUTPUT = "invalid_output"
+BINARY_NOT_FOUND = "binary_not_found"
+#: An exception no explorer classified (a crash, a missing config file, ...).
+ERROR = "error"
+OUTCOMES = (SUCCESS, TIMEOUT, PROVIDER_ERROR, INVALID_OUTPUT, BINARY_NOT_FOUND, ERROR)
+#: A case that was never run, because it has no checkout and the run allows
+#: skipping one. Not a row outcome — an unattempted case is never scored, so
+#: it has no row; the manifest's summary counts it instead.
+NOT_ATTEMPTED = "not_attempted"
+
+
+class ExplorerFailure(RuntimeError):
+    """A case that produced no usable answer, and why."""
+
+    def __init__(self, outcome: str, message: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+
+def classify_failure(exc: BaseException) -> str:
+    """The outcome recorded for an exception raised by ``explore``."""
+    if isinstance(exc, ExplorerFailure):
+        return exc.outcome
+    if isinstance(exc, (TimeoutError, subprocess.TimeoutExpired)):
+        return TIMEOUT
+    return ERROR
 
 
 @runtime_checkable

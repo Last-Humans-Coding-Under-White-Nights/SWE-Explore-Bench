@@ -152,7 +152,7 @@ def test_reconcile_drops_a_case_torn_between_budgets(tmp_path):
     torn = {"instance_id": "case-2", "metrics": {"recall": 0.5}}
     template = _seed_results(tmp_path, {1: [done, torn], 2: [done]})
 
-    resumed_ids, kept = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+    resumed_ids, kept, _ = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
 
     assert resumed_ids == {"case-1"}
     assert kept == {1: [done], 2: [done]}
@@ -164,7 +164,7 @@ def test_reconcile_collapses_rows_a_past_run_wrote_twice(tmp_path):
     second = {"instance_id": "case-1", "metrics": {"recall": 0.9}}
     template = _seed_results(tmp_path, {1: [first, second], 2: [first]})
 
-    resumed_ids, kept = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+    resumed_ids, kept, _ = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
 
     assert resumed_ids == {"case-1"}
     assert kept[1] == [second]
@@ -193,7 +193,7 @@ def test_resume_repairs_a_line_left_half_written(tmp_path):
     with torn.open("a", encoding="utf-8") as f:
         f.write('{"instance_id": "case-2", "met')
 
-    resumed_ids, kept = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+    resumed_ids, kept, _ = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
 
     assert resumed_ids == {"case-1"}
     assert kept[1] == [done]
@@ -412,7 +412,7 @@ def test_reconcile_ignores_rows_that_identify_no_case(tmp_path, invalid_id):
     invalid = {"instance_id": invalid_id, "metrics": {}}
     template = _seed_results(tmp_path, {1: [done, blank, invalid], 2: [done, blank, invalid]})
 
-    resumed_ids, kept = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
+    resumed_ids, kept, _ = eval_runner._reconcile_resume_state(template, "oracle", [1, 2])
 
     assert resumed_ids == {"case-1"}
     assert kept == {1: [done], 2: [done]}

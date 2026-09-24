@@ -148,11 +148,76 @@ uv run python eval_runner.py \
 `--resume` continues the existing `--output` files instead of starting over:
 
 - A case counts as done only when it is present in *every* `top_k` file. One that an interrupt left in some files but not others is dropped from disk and re-run, so it contributes exactly one row per budget and a resumed run reports the same numbers as an uninterrupted one.
+- A case whose row records a failure is run again and its rows are replaced: a timeout or a rate limit is a reason to retry, not a verdict. Only a case the run selected is retried, so a failed row that `--limit` or `--instance-ids` excludes is left alone rather than deleted by a run that was never going to replace it. `--no-retry-failed` keeps those rows and treats the case as done. A row written before outcomes were recorded says nothing about how the case ended and is taken as done either way.
 - Each explorer and budget needs a file of its own, so keep `{explorer}` and `{k}` in `--output`. A result row records no `top_k`, so budgets sharing one file cannot be told apart and the run stops rather than guess.
 - If a `top_k` file is missing entirely — you added a budget, or changed `--output` — the run stops instead of discarding the rows the other budgets already hold.
 - Every explorer's files are checked before the first one starts, so an unresumable layout stops the run right away rather than once the run reaches that explorer.
+- The configuration must match the one that produced the files (see [Run manifest](#run-manifest)). If it differs — another model, CLI version, prompt, profile, bench file, issue map or retrieval setting — the run stops and lists what changed, qualified by the block it came from (`explorer_config.model: ...`), instead of blending two experiments into one table. Result files written before manifests existed carry none; they are adopted with a warning. A field one side does not know — the CLI could not answer `debug config` on that run, so it recorded `null` — is reported and stepped over rather than read as a change, so one slow startup does not cost every later resume.
 
 Without `--resume` the output files are rewritten from scratch.
+
+#### Case outcomes
+
+Every case that is attempted gets exactly one row per budget, and the row records how it ended in `outcome`:
+
+| Outcome | Meaning |
+| --- | --- |
+| `success` | The explorer returned an answer. For CLI agents that includes an answer that uses the `RELEVANT_FILES:` contract but names no region. |
+| `timeout` | The run exceeded its time limit. |
+| `provider_error` | A CLI agent reported `error` events on its stream and produced no answer, whether it exited non-zero or cleanly. |
+| `invalid_output` | A CLI agent exited cleanly without error events but never produced an answer. |
+| `binary_not_found` | The agent CLI went missing while the run was going. A binary that is already absent at startup stops the run there instead, with the install hint: it is a setup error, not a benchmark result. |
+| `error` | A CLI agent exited non-zero with nothing on its stream — a bad flag or a broken configuration is not the provider's doing — or any other exception (a crash, a missing config file, ...). |
+
+The four specific failure outcomes are reported by the `opencode` and `deveco` explorers. `claude_code` and `cursor` do not classify their failures yet: a timeout or a missing binary reaches the row as `error`, and a run that exits cleanly with no answer is still recorded as a `success` with no regions. They are scored identically either way — the rule below does not depend on the label — but their rows say less about why.
+
+Scoring rule: **a failed case is scored as an empty answer** — every metric is 0 and it counts in every average. A failure is never cheaper than a bad answer, and how a failure surfaced (a non-zero exit, a clean exit with junk output, an exception) does not change the score. The row keeps the failure's message in `error` (otherwise `null`) and the tokens the case spent in `token_usage`. `error` holds the classified message only — `OpenCode CLI timed out after 600s`, or the collapsed messages of the stream's `error` events — never the agent's raw stdout or stderr, which is the model's own output and belongs in the log rather than in a result file that may be published. On a timeout the output the CLI produced before it was killed is still read, so the usage it reported is recorded.
+
+A case whose repository checkout is missing is not attempted (with the default `--skip-missing-repo`): it gets no row and is counted as `not_attempted` in the summary below. With `--no-skip-missing-repo` the case is run after all, and the missing checkout is a failure like any other: an `error` row naming the path, scored as an empty answer.
+
+Rows also record `repo_revision`, the git HEAD of the case's checkout when it is a git work tree (`null` for snapshots extracted from archives), and `explorer_config` for explorers that have one. For a CLI agent the row keeps the CLI and the model; the hashes, the version and the MCP map are identical in every row and live in the manifest beside the file.
+
+#### Run manifest
+
+Beside every result file `X.jsonl` the runner writes `X.manifest.json`:
+
+```json
+{
+  "schema": 1,
+  "explorers": {
+    "opencode": {
+      "manifest": {
+        "explorer": "opencode",
+        "bench_sha256": "…",
+        "issues_sha256": "…",
+        "explorer_config": {
+          "cli": "OpenCode CLI", "cli_version": "1.18.29",
+          "model": "swe-explore/gpt-5.4", "model_source": "config", "agent": "build",
+          "prompt_sha256": "…", "profile_sha256": "…", "resolved_config_sha256": "…",
+          "mcp_servers": {"serena": {"type": "local", "enabled": true}}
+        },
+        "recorded": {"created_at": "…", "bench_path": "…", "harness_revision": "…"}
+      },
+      "summary": {
+        "5": {
+          "cases": 100, "attempted": 98, "not_attempted": 2,
+          "outcomes": {"success": 91, "timeout": 4, "provider_error": 3},
+          "completion_rate": 0.91,
+          "metrics": {"precision": 0.41},
+          "token_usage": {"input": 1200000, "output": 90000},
+          "token_usage_cases": 98
+        }
+      }
+    }
+  }
+}
+```
+
+- `explorer`, `bench_sha256`, `issues_sha256` and `explorer_config` identify the experiment, and `--resume` compares them. `recorded` is informational, as is `explorer_config.model_source`, which says how the model was chosen rather than which one ran: pinning the model the configuration had already selected produces the same command line and resumes cleanly. Paths are recorded without this machine in them — relative to the working directory, or as a bare file name — so a manifest can be read on another checkout. `issues_sha256` covers the issue text every explorer is given, so a rewritten `--issue-map` is a different experiment even against the same bench.
+- For `opencode` and `deveco`, `explorer_config` comes from the CLI itself, once per run: `--version`, and `debug config`, the configuration it resolves from all of its sources under the same isolated home a case runs in. That configuration is hashed with every credential redacted (`apiKey`, tokens, passwords, and the values of `environment` and `headers` maps), so **the manifest holds no secret** and rotating a key does not block a resume. `debug config` is asked with `--pure`, which resolves the configuration without plugins, so a plugin's config hook is not in `resolved_config_sha256`; the shipped profiles have no plugins, and a profile that gains one is identified by `profile_sha256` instead. `profile_sha256` hashes the files of the `--*-config-dir` profile — JSON files through the same redaction, so an inline key can be rotated there too — and skips what the CLI writes into the profile itself: the names its own `.gitignore` lists (OpenCode installs plugin dependencies there on first use: `node_modules`, `package.json`, a lockfile), desktop metadata such as `.DS_Store`, and the `.git` file a work tree carries, which holds a local absolute path. `prompt_sha256` hashes the prompt template and `--*-prompt-additions`.
+- The model is always named on the command line: `--opencode-model` / `--deveco-model` if given (`model_source: "flag"`), otherwise the model of the agent in effect (`"agent"`) — the one `--opencode-agent` / `--deveco-agent` named, the configuration's default, or the one the CLI falls back to when neither is set — otherwise the top-level model of the resolved configuration (`"config"`). An agent outranks the top-level model, so pinning it cannot override the selection `--opencode-agent` / `--deveco-agent` made.
+- Explorers that are not CLI agents record their own settings too: the chunked retrieval explorers record `chunk_size` and `chunk_overlap`, plus the model that scores those chunks where there is one (`embed` its backend, model and preset, `swerank` its embedding and reranking models, `potion` its model path); `rag` records the model it embeds with, `codenib` its policy and budgets, and the agentic and academic explorers their model. `bm25`, `tfidf` and the baselines have nothing beyond chunking to record. Resuming across a change to any of them is refused just the same.
+- `summary` is written when an explorer finishes. `completion_rate` is `success / cases`, where `cases` is the number of cases the run selected, after `--limit`. Resuming counts only the rows for those cases, so a narrowed resume reports on the narrowed selection rather than on the rows the file happens to hold (the rows themselves are kept); `metrics` are averages over the attempted cases, failures included as zeros.
 
 Available explorers include:
 
