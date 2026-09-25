@@ -761,26 +761,45 @@ def _write_summary(results_path: Path, explorer: str, k: int, summary: dict) -> 
     _write_sidecar(sidecar, entries)
 
 
-def _summarize(
-    rows: list[dict],
-    averages: dict[str, float],
-    cases: int,
-    usage: TokenUsage,
-    usage_cases: int,
-) -> dict:
+class _Tally:
+    """One explorer's scored rows per budget, resumed and new alike."""
+
+    def __init__(self, top_k_list: list[int]) -> None:
+        self.rows: dict[int, list[dict]] = {k: [] for k in top_k_list}
+        self._totals = {k: {m: 0.0 for m in METRICS} for k in top_k_list}
+        self.usage = TokenUsage()
+        self.usage_cases = 0
+
+    def add_row(self, k: int, row: dict) -> None:
+        self.rows[k].append(row)
+        for m in METRICS:
+            self._totals[k][m] += (row.get("metrics") or {}).get(m, 0.0)
+
+    def add_usage(self, usage: TokenUsage | None) -> None:
+        # A zeroed usage is a tool that reported nothing; counting it would
+        # depress the per-case mean.
+        if usage is not None and usage.has_any():
+            self.usage.add(usage)
+            self.usage_cases += 1
+
+    def averages(self, k: int) -> dict[str, float]:
+        n = len(self.rows[k])
+        return {m: (self._totals[k][m] / n if n else 0.0) for m in METRICS}
+
+
+def _summarize(tally: _Tally, k: int, cases: int) -> dict:
     """How the cases at one budget ended, for the manifest and the console.
 
     Every attempted case has a row, failures included, so `attempted` is the
-    row count and `averages` — the accumulators the results table is printed
-    from, passed in so the table and the manifest cannot disagree — is over
-    all of them. Rows written before outcomes were recorded count as
-    `unrecorded`.
+    row count and the averages are over all of them. Rows written before
+    outcomes were recorded count as `unrecorded`.
 
     `cases` is the number of cases this run selected, after `--limit` and
     `--instance-ids`, so the cases that were never attempted are what is left
     over. Counting this run's skips instead would restart at zero on every
     `--resume` and shrink the completion rate's denominator.
     """
+    rows = tally.rows[k]
     outcomes: dict[str, int] = {}
     for row in rows:
         outcome = row.get("outcome") or "unrecorded"
@@ -792,9 +811,9 @@ def _summarize(
         "not_attempted": max(cases - attempted, 0),
         "outcomes": dict(sorted(outcomes.items())),
         "completion_rate": outcomes.get(SUCCESS, 0) / cases if cases else None,
-        "metrics": dict(averages),
-        "token_usage": usage.to_dict(),
-        "token_usage_cases": usage_cases,
+        "metrics": tally.averages(k),
+        "token_usage": tally.usage.to_dict(),
+        "token_usage_cases": tally.usage_cases,
     }
 
 
@@ -826,6 +845,32 @@ def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
         f"(in {sub.input_tokens:,}, out {sub.output_tokens:,}, "
         f"reasoning {sub.reasoning_tokens:,})[/dim]"
     )
+
+
+def _report_explorer(name: str, tally: _Tally, cases: int, output_jsonl: str | None) -> None:
+    """Summary table, outcomes and usage; the summary also goes to the manifest."""
+    table = Table(title=f"{name} Results", show_lines=False)
+    table.add_column("top_k", justify="right")
+    table.add_column("Eval", justify="right")
+    for metric in METRICS:
+        table.add_column(metric, justify="right")
+    summaries = {}
+    for k, rows in tally.rows.items():
+        summaries[k] = _summarize(tally, k, cases)
+        avg = summaries[k]["metrics"]
+        table.add_row(str(k), str(len(rows)), *[f"{avg[m]:.4f}" for m in METRICS])
+    console.print(table)
+    first = next(iter(summaries.values()))
+    rate = first["completion_rate"]
+    outcomes = ", ".join(f"{o}={n}" for o, n in first["outcomes"].items()) or "none"
+    console.print(
+        f"  Outcomes: {outcomes}; not attempted={first['not_attempted']}; "
+        f"completion rate={'n/a' if rate is None else f'{rate:.1%}'}"
+    )
+    _print_usage_table(name, tally.usage, tally.usage_cases)
+    if output_jsonl:
+        for k, summary in summaries.items():
+            _write_summary(_format_output_path(output_jsonl, name, k), name, k, summary)
 
 
 class _CaseRun(NamedTuple):
@@ -1561,11 +1606,7 @@ def run(
         method = METHOD_MAP[name]
 
         # ── resume: load existing results and skip completed instances ──
-        per_k_totals: dict[int, dict[str, float]] = {k: {m: 0.0 for m in METRICS} for k in top_k_list}
-        per_k_evaluated: dict[int, int] = {k: 0 for k in top_k_list}
-        per_k_results: dict[int, list[dict]] = {k: [] for k in top_k_list}
-        usage_totals = TokenUsage()
-        usage_cases = 0
+        tally = _Tally(top_k_list)
         # Cases with no repository checkout: never run, so never scored.
         not_attempted = 0
         resumed_ids: set[str] = set()
@@ -1582,7 +1623,7 @@ def run(
                     f"run again; their rows are replaced (--no-retry-failed keeps "
                     f"them)[/yellow]"
                 )
-            # Pre-load the surviving rows into the accumulators, but only for
+            # Pre-load the surviving rows into the tally, but only for
             # the cases this run selected: --limit or --instance-ids can name
             # fewer than the file holds, and a total counting rows the
             # selection excludes reports on an experiment nobody asked for
@@ -1590,52 +1631,11 @@ def run(
             # the file — a narrowed selection reads less, it destroys nothing.
             for k in top_k_list:
                 for r in kept_per_k[k]:
-                    if r.get("instance_id") not in selected_ids:
-                        continue
-                    per_k_results[k].append(r)
-                    per_k_evaluated[k] += 1
-                    for m in METRICS:
-                        per_k_totals[k][m] += (r.get("metrics") or {}).get(m, 0.0)
-            # Token usage is per-case, not per-budget: count each resumed
-            # instance once, from its row in the first top_k file.
-            for r in per_k_results[top_k_list[0]]:
-                tu = TokenUsage.from_dict(r.get("token_usage"))
-                # `has_any`, as a fresh run counts it: `from_dict` returns a
-                # zeroed object for a row whose tool reported nothing, and
-                # counting it would depress the per-case mean on resume only.
-                if tu is not None and tu.has_any():
-                    usage_totals.add(tu)
-                    usage_cases += 1
-
-        def _report_explorer() -> None:
-            """Summary table, outcomes and usage; the summary also goes to the manifest."""
-            table = Table(title=f"{name} Results", show_lines=False)
-            table.add_column("top_k", justify="right")
-            table.add_column("Eval", justify="right")
-            for metric in METRICS:
-                table.add_column(metric, justify="right")
-            summaries = {}
-            for k in top_k_list:
-                ev = per_k_evaluated[k]
-                avg = {m: (per_k_totals[k][m] / ev if ev else 0.0) for m in METRICS}
-                table.add_row(str(k), str(ev), *[f"{avg[m]:.4f}" for m in METRICS])
-                summaries[k] = _summarize(
-                    per_k_results[k], avg, total_records, usage_totals, usage_cases
-                )
-            console.print(table)
-            first = summaries[top_k_list[0]]
-            rate = first["completion_rate"]
-            outcomes = ", ".join(f"{o}={n}" for o, n in first["outcomes"].items()) or "none"
-            console.print(
-                f"  Outcomes: {outcomes}; not attempted={first['not_attempted']}; "
-                f"completion rate={'n/a' if rate is None else f'{rate:.1%}'}"
-            )
-            _print_usage_table(name, usage_totals, usage_cases)
-            if output_jsonl:
-                for k, summary in summaries.items():
-                    _write_summary(
-                        _format_output_path(output_jsonl, name, k), name, k, summary
-                    )
+                    if r.get("instance_id") in selected_ids:
+                        tally.add_row(k, r)
+            # Usage is per case: count it once, from the first budget.
+            for r in tally.rows[top_k_list[0]]:
+                tally.add_usage(TokenUsage.from_dict(r.get("token_usage")))
 
         remaining_records = [r for r in records if r.get("instance_id", "") not in resumed_ids]
         total_remaining = len(remaining_records)
@@ -1646,7 +1646,7 @@ def run(
         )
         if total_remaining == 0:
             console.print(f"  [dim]All instances already completed, skipping.[/dim]")
-            _report_explorer()
+            _report_explorer(name, tally, total_records, output_jsonl)
             continue
 
         t0 = time.time()
@@ -1739,7 +1739,6 @@ def run(
             answered with nothing, so a failure never costs less than a bad
             answer (README "Case outcomes").
             """
-            nonlocal usage_cases
             iid, preds, usage = case.iid, case.preds, case.usage
             scores_per_k = _score_instance(iid, preds)
             row_usage = usage.to_dict() if usage is not None else None
@@ -1758,16 +1757,10 @@ def run(
                 }
                 if row_config:
                     row["explorer_config"] = row_config
-                for m in METRICS:
-                    per_k_totals[k][m] += scores_per_k[k][m]
-                per_k_evaluated[k] += 1
-                per_k_results[k].append(row)
+                tally.add_row(k, row)
                 if k in out_files:
                     _append_row(out_files[k], row)
-            # Token usage is per-case, not per-top_k: accumulate once.
-            if usage is not None:
-                usage_totals.add(usage)
-                usage_cases += 1
+            tally.add_usage(usage)
             primary_scores = scores_per_k[primary_k]
             return (
                 primary_scores["precision"],
@@ -1793,15 +1786,15 @@ def run(
                 case_u.reasoning_tokens,
                 case_u.total,
             )
-            n = per_k_evaluated[primary_k]
+            avg = tally.averages(primary_k)
             aggr_vals = (
-                per_k_totals[primary_k]["precision"] / n,
-                per_k_totals[primary_k]["recall"] / n,
-                per_k_totals[primary_k]["f1_score"] / n,
-                usage_totals.input_tokens,
-                usage_totals.output_tokens,
-                usage_totals.reasoning_tokens,
-                usage_totals.total,
+                avg["precision"],
+                avg["recall"],
+                avg["f1_score"],
+                tally.usage.input_tokens,
+                tally.usage.output_tokens,
+                tally.usage.reasoning_tokens,
+                tally.usage.total,
             )
             labels = ("prec", "recall", "f1", "in", "out", "think", "total")
 
@@ -1873,16 +1866,16 @@ def run(
         total_elapsed = time.time() - t0
         console.print(
             f"  [dim]{name} done in {total_elapsed:.0f}s  "
-            f"(eval={per_k_evaluated[top_k_list[0]]}, not attempted={not_attempted}, "
+            f"(eval={len(tally.rows[primary_k])}, not attempted={not_attempted}, "
             f"resumed={len(resumed_ids & selected_ids)})[/dim]"
         )
-        _report_explorer()
+        _report_explorer(name, tally, total_records, output_jsonl)
 
         # ── save per top_k (already written incrementally; just log) ──
         if output_jsonl:
             for k in top_k_list:
                 out_path = _format_output_path(output_jsonl, name, k)
-                console.print(f"  [green]Saved {out_path} ({per_k_evaluated[k]} records)[/green]")
+                console.print(f"  [green]Saved {out_path} ({len(tally.rows[k])} records)[/green]")
 
 
 if __name__ == "__main__":
