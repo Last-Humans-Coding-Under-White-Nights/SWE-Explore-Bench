@@ -485,10 +485,6 @@ class CliAgentDescribeTest(unittest.TestCase):
         self.assertEqual(described["cli_version"], "1.18.29")
         self.assertEqual(described["model"], "swe-explore/gpt-5.4")
         self.assertEqual(described["model_source"], "config")
-        self.assertEqual(described["mcp_servers"], {
-            "off": {"type": "remote", "enabled": False},
-            "serena": {"type": "local", "enabled": True},
-        })
         self.assertIsNotNone(described["resolved_config_sha256"])
         self.assertIsNotNone(described["prompt_sha256"])
         self.assertIn(["oc-test", "debug", "config", "--pure"], calls)
@@ -541,26 +537,23 @@ class CliAgentDescribeTest(unittest.TestCase):
         self.assertEqual((plain["model"], plain["model_source"]),
                          ("swe-explore/gpt-5.4", "config"))
 
-    def test_profile_hash_ignores_a_rotated_key_but_not_a_real_change(self) -> None:
-        """A profile may hold an inline credential; rotating it must not
-        look like a different configuration (README "Run manifest")."""
-        def profile_hash(api_key: str, model: str = "m/one") -> str | None:
-            with tempfile.TemporaryDirectory() as tmp:
-                root = Path(tmp)
-                (root / "opencode.json").write_text(
-                    json.dumps({"model": model, "provider": {"p": {"options": {
-                        "apiKey": api_key}}}}),
-                    encoding="utf-8",
-                )
-                (root / "notes.txt").write_text("not json", encoding="utf-8")
-                described, _ = self._describe(
-                    self._resolved(self.SECRET), config_dir=root
-                )
-                return described["profile_sha256"]
-
-        self.assertIsNotNone(profile_hash("sk-one"))
-        self.assertEqual(profile_hash("sk-one"), profile_hash("sk-rotated"))
-        self.assertNotEqual(profile_hash("sk-one"), profile_hash("sk-one", model="m/two"))
+    def test_seed_hash_follows_the_files_placed_into_the_checkout(self) -> None:
+        """Seed files are not in `debug config`, so they are hashed on their own."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            bare, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            seed = root / "checkout" / ".serena" / "project.yml"
+            seed.parent.mkdir(parents=True)
+            seed.write_text("language: cpp\n", encoding="utf-8")
+            seeded, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            (root / "notes.txt").write_text("outside the seed", encoding="utf-8")
+            unrelated, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            seed.write_text("language: rust\n", encoding="utf-8")
+            edited, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertNotEqual(bare["seed_sha256"], seeded["seed_sha256"])
+        self.assertEqual(seeded["seed_sha256"], unrelated["seed_sha256"])
+        self.assertNotEqual(seeded["seed_sha256"], edited["seed_sha256"])
 
     def test_trailing_output_after_the_config_is_tolerated(self) -> None:
         """A plugin's "Done in 12ms" line must not cost us the configuration."""
@@ -577,79 +570,9 @@ class CliAgentDescribeTest(unittest.TestCase):
             described = explorer.describe()
         clean, _ = self._describe(resolved)
         self.assertEqual(described["model"], "swe-explore/gpt-5.4")
-        self.assertEqual(described["mcp_servers"], clean["mcp_servers"])
         self.assertEqual(
             described["resolved_config_sha256"], clean["resolved_config_sha256"]
         )
-
-    def test_profile_hash_ignores_desktop_metadata_files(self) -> None:
-        """Opening the profile in Finder must not look like a config change."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
-            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-            (root / ".DS_Store").write_bytes(b"\x00\x01finder")
-            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-            # A dotfile that is real configuration still counts.
-            (root / ".env").write_text("MODE=fast\n", encoding="utf-8")
-            with_env, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
-        self.assertNotEqual(before["profile_sha256"], with_env["profile_sha256"])
-
-    def test_profile_hash_skips_installed_dependency_trees(self) -> None:
-        """node_modules is pinned by the lockfile and is not read."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
-            deps = root / "node_modules" / "pkg"
-            deps.mkdir(parents=True)
-            (deps / "index.js") .write_text("module.exports = 1", encoding="utf-8")
-            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-            (deps / "index.js").write_text("module.exports = 2", encoding="utf-8")
-            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
-
-    def test_profile_hash_skips_what_the_cli_generated(self) -> None:
-        """OpenCode installs plugins into the profile and lists what it wrote."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
-            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-            # What `opencode` writes on first use, `.gitignore` included.
-            (root / ".gitignore").write_text(
-                "node_modules\npackage.json\npackage-lock.json\nbun.lock\n",
-                encoding="utf-8",
-            )
-            (root / "package.json").write_text('{"dependencies": {}}', encoding="utf-8")
-            (root / "bun.lock").write_text("lockfile v1", encoding="utf-8")
-            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-            # A file it did not generate still counts.
-            (root / "plugin.json").write_text('{"on": "chat"}', encoding="utf-8")
-            with_plugin, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
-        self.assertNotEqual(before["profile_sha256"], with_plugin["profile_sha256"])
-
-    def test_profile_hash_ignores_the_git_file_of_a_work_tree(self) -> None:
-        """In a work tree `.git` is a file holding this machine's path."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
-            before, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-            (root / ".git").write_text(
-                "gdir: /Users/someone/checkouts/bench/.git/worktrees/w1\n",
-                encoding="utf-8",
-            )
-            after, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-        self.assertEqual(before["profile_sha256"], after["profile_sha256"])
-
-    def test_a_dangling_symlink_in_the_profile_does_not_crash_the_run(self) -> None:
-        """os.walk lists a broken link among the files; opening it raises."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
-            os.symlink(str(root / "never-created.json"), str(root / "dangling"))
-            described, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
-        self.assertIsNotNone(described["profile_sha256"])
 
     def test_config_is_found_among_the_cli_s_own_chatter(self) -> None:
         """A brace in a log line before the object must not be mistaken for it."""

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import hashlib
 import json
 import os
 import signal
@@ -27,7 +26,7 @@ from rich.console import Console
 from rich.table import Table
 
 from eval import ExploreEvaluator
-from explorers._cli_agent_base import set_log_level
+from explorers._cli_agent_base import set_log_level, sha256_file, sha256_json
 from explorers._cli_process import cli_cancel_event, kill_active_cli_trees
 from explorers.base import (
     ERROR,
@@ -488,14 +487,6 @@ def _manifest_path(results_path: Path) -> Path:
     return results_path.with_name(results_path.stem + ".manifest.json")
 
 
-def _file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
 @functools.lru_cache(maxsize=None)
 def _git_revision(path: Path) -> str | None:
     """HEAD of the git work tree rooted exactly at `path`, else None.
@@ -526,15 +517,10 @@ def _git_revision(path: Path) -> str | None:
     return lines[1]
 
 
-def _json_sha256(value: object) -> str:
-    canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 def _row_explorer_config(config: dict) -> dict:
     """What a result row repeats from the explorer's configuration.
 
-    A CLI agent's block is four hashes, a version and an MCP map, identical
+    A CLI agent's block is three hashes and a version, identical
     in every row at every budget; the manifest beside the file records it
     once. The row keeps the model, which is what a row is read for. Every
     other explorer's block is a handful of settings and is kept whole.
@@ -573,10 +559,10 @@ def _build_manifests(
         "bench_path": _portable_path(bench_path),
         "harness_revision": _git_revision(Path(__file__).resolve().parent),
     }
-    bench_sha256 = _file_sha256(bench_path)
+    bench_sha256 = sha256_file(bench_path)
     # The issue text is every explorer's query, so a changed issue map is a
     # changed experiment even when the bench and the explorer are identical.
-    issues_sha256 = _json_sha256(issue_map)
+    issues_sha256 = sha256_json(issue_map)
     # Compare what a JSON round trip gives back, not Python tuples and the like.
     return json.loads(json.dumps({
         name: {
@@ -719,7 +705,8 @@ def _check_resume(
             for field in unknown:
                 warn(
                     f"{explorer}: {field} is unknown on one side — a probe that "
-                    f"could not run records no value — so it was not compared"
+                    f"could not run, or a field that side does not record — so it "
+                    f"was not compared"
                 )
     return warnings
 
@@ -1568,13 +1555,11 @@ def run(
             raise typer.Exit(1) from exc
         if name in CLI_AGENT_MAKERS:
             cfg = explorer_configs[name]
-            servers = cfg["mcp_servers"]
             console.print(
                 f"[dim]{name} configuration: model={cfg['model']} "
-                f"({cfg['model_source']}), cli={cfg['cli_version']}, "
-                f"mcp={'unknown' if servers is None else sorted(servers) or 'none'}[/dim]"
+                f"({cfg['model_source']}), cli={cfg['cli_version']}[/dim]"
             )
-            if servers is None:
+            if cfg["resolved_config_sha256"] is None:
                 console.print(
                     f"[yellow]{name}: the CLI did not answer `debug config`, so its "
                     f"resolved configuration is unknown and cannot be compared on a "

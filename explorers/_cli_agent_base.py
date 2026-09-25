@@ -257,117 +257,17 @@ def redact_config(node: Any, key: str = "") -> Any:
     return REDACTED if isinstance(node, str) and _is_secret_key(key) else node
 
 
-def _sha256_json(value: Any) -> str:
+def sha256_json(value: Any) -> str:
     canonical = json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-#: Directory names a profile digest walks past: an installed dependency tree
-#: is the CLI's own doing, not the configuration it was given.
-_UNHASHED_DIRS = frozenset({"node_modules", ".git", "__pycache__"})
-#: File names a profile digest ignores: metadata the desktop writes on its
-#: own, and the `.git` file a work tree or submodule carries, which holds
-#: this machine's path to the real git directory. Opening the profile in
-#: Finder, or keeping it in a work tree, would otherwise change its hash and
-#: make the next --resume report a configuration that nobody changed. Only
-#: these exact names, not every dotfile — a profile's own `.env` or
-#: `.serena/project.yml` is configuration and has to count.
-_UNHASHED_FILES = frozenset({".DS_Store", "Thumbs.db", "desktop.ini", ".git"})
-#: A profile is a directory the CLI also writes to: OpenCode installs plugin
-#: dependencies into it on first use and drops a `.gitignore` naming what it
-#: generated. Those names are the CLI's own statement about which files are
-#: not the configuration, so the digest takes it at its word — otherwise the
-#: first run makes every later `--resume` refuse over files nobody edited.
-_PROFILE_IGNORE_FILE = ".gitignore"
-
-
-def _generated_names(root: Path) -> frozenset[str]:
-    """Names the profile's own `.gitignore` says the CLI generated.
-
-    Plain names only, which is all these files use (`node_modules`,
-    `package.json`, `bun.lock`); a pattern with a slash or a wildcard in it
-    is left to count, since it is not one of those.
-    """
-    try:
-        text = (root / _PROFILE_IGNORE_FILE).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return frozenset()
-    names = {_PROFILE_IGNORE_FILE}
-    for line in text.splitlines():
-        entry = line.strip().rstrip("/")
-        if not entry or entry.startswith("#") or entry.startswith("!"):
-            continue
-        if "/" in entry or "*" in entry or "?" in entry or "[" in entry:
-            continue
-        names.add(entry)
-    return frozenset(names)
-
-
-def _sha256_file(path: Path) -> bytes:
-    """Digest of one file, read in blocks rather than whole."""
+def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as f:
         for block in iter(lambda: f.read(1 << 20), b""):
             digest.update(block)
-    return digest.digest()
-
-
-def _sha256_tree(root: Path) -> str | None:
-    """Digest of every file under ``root`` by relative path and content.
-
-    A JSON file is hashed through `redact_config`, not as bytes: a profile
-    may carry an inline credential, and hashing it raw would make rotating
-    that credential look like a different configuration and block a resume —
-    the opposite of what the manifest promises. A file that does not parse as
-    JSON is hashed as bytes.
-
-    Skips `_UNHASHED_DIRS` and whatever the profile's own `.gitignore` names:
-    OpenCode installs its plugins into the profile on first use, some 61 MB of
-    `node_modules` with a lockfile beside it, and hashing what it generated
-    would both cost seconds of I/O per run and make the next `--resume` refuse
-    over a configuration nobody changed.
-    """
-    if not root.is_dir():
-        return None
-    skipped = _UNHASHED_FILES | _generated_names(root)
-    paths = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _UNHASHED_DIRS and d not in skipped]
-        for name in filenames:
-            if name in skipped:
-                continue
-            path = Path(dirpath) / name
-            # `os.walk` lists a dangling symlink among the files; opening it
-            # raises, and a profile is not worth crashing a run's startup for.
-            # `is_file` follows the link and is False when it leads nowhere.
-            if path.is_file():
-                paths.append(path)
-    digest = hashlib.sha256()
-    for path in sorted(paths):
-        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
-        digest.update(_sha256_redacted(path))
     return digest.hexdigest()
-
-
-#: Stands in for a profile file that could not be read at all.
-_UNREADABLE = hashlib.sha256(b"<unreadable>").digest()
-
-
-def _sha256_redacted(path: Path) -> bytes:
-    """Digest of one profile file, with any credential in it redacted."""
-    if path.suffix.lower() == ".json":
-        try:
-            parsed = json.loads(path.read_text(encoding="utf-8", errors="replace"))
-        except (OSError, ValueError):
-            pass
-        else:
-            return bytes.fromhex(_sha256_json(redact_config(parsed)))
-    try:
-        return _sha256_file(path)
-    except OSError:
-        # Unreadable permissions, or removed between the walk and the read:
-        # the profile still gets a digest rather than aborting the run.
-        return _UNREADABLE
 
 
 @dataclass
@@ -472,8 +372,8 @@ class BaseCliAgentExplorer(Explorer):
 
         ``--pure`` resolves the configuration without plugins, so a plugin's
         config hook is not in ``resolved_config_sha256`` even though a run
-        would load it. The shipped profiles have no plugins; a profile that
-        gains one is identified by ``profile_sha256`` instead.
+        would load it. The shipped profiles have no plugins. Seed files are not
+        in ``debug config``; ``seed_sha256`` covers them.
 
         A probe that fails for any reason other than a missing binary — a
         timeout on a loaded machine, a CLI that has no ``debug config`` —
@@ -514,10 +414,6 @@ class BaseCliAgentExplorer(Explorer):
             model_source = "agent"
         else:
             model_source = "config" if model else None
-        # `{}` is "the CLI answered, and no server is configured"; `None` is
-        # "the CLI did not answer", which is not the same thing and must not
-        # read as a configuration change on the next resume.
-        mcp = config.get("mcp") if isinstance(config.get("mcp"), dict) else {}
         return {
             "cli": self.cli_display_name,
             "cli_version": version,
@@ -527,17 +423,12 @@ class BaseCliAgentExplorer(Explorer):
             "prompt_sha256": hashlib.sha256(
                 f"{self.prompt_template}\0{self.prompt_additions}".encode("utf-8")
             ).hexdigest(),
-            "profile_sha256": (
-                _sha256_tree(self.config_dir) if self.config_dir is not None else None
-            ),
             "resolved_config_sha256": (
-                _sha256_json(redact_config(resolved)) if resolved is not None else None
+                sha256_json(redact_config(resolved)) if resolved is not None else None
             ),
-            "mcp_servers": None if resolved is None else {
-                name: {"type": server.get("type"), "enabled": server.get("enabled", True)}
-                for name, server in sorted(mcp.items())
-                if isinstance(server, dict)
-            },
+            "seed_sha256": sha256_json(
+                {rel: sha256_file(path) for rel, path in self._seed_files().items()}
+            ),
         }
 
     def _collect_usage(self, stdout_text: str, env: dict[str, str]) -> TokenUsage | None:
@@ -614,6 +505,16 @@ class BaseCliAgentExplorer(Explorer):
             raise FileNotFoundError(f"{self.config_filename} not found at {config_src}")
         env[self.config_env_var] = str(self.config_dir.resolve())
 
+    def _seed_files(self) -> dict[str, Path]:
+        """Profile files placed into the checkout per run, by relative path."""
+        if self.config_dir is None:
+            return {}
+        seed_root = self.config_dir / CHECKOUT_SEED_DIR
+        return {
+            path.relative_to(seed_root).as_posix(): path
+            for path in sorted(seed_root.rglob("*")) if path.is_file()
+        }
+
     def _seed_checkout(self) -> CheckoutSeed:
         """Copy profile files, recording only paths created by this run.
 
@@ -621,14 +522,9 @@ class BaseCliAgentExplorer(Explorer):
         source-file error can be mistaken for a missing CLI binary.
         """
         seeded = CheckoutSeed()
-        if self.config_dir is None:
-            return seeded
-        seed_root = self.config_dir / CHECKOUT_SEED_DIR
-        if not seed_root.is_dir():
-            return seeded
         try:
-            for source in sorted(p for p in seed_root.rglob("*") if p.is_file()):
-                target = self.repo_root / source.relative_to(seed_root)
+            for rel, source in self._seed_files().items():
+                target = self.repo_root / rel
                 if target.exists() or target.is_symlink():
                     continue
                 parents = []

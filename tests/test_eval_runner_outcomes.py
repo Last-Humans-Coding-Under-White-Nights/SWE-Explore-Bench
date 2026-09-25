@@ -225,7 +225,6 @@ def test_manifest_records_the_configuration_and_no_secret(tmp_path, fake_opencod
     assert config["model"] == "fake/pinned"
     assert config["model_source"] == "flag"
     assert config["cli_version"] == "1.18.29"
-    assert config["mcp_servers"] == {"serena": {"type": "local", "enabled": True}}
     assert len(config["prompt_sha256"]) == 64
     assert len(config["resolved_config_sha256"]) == 64
     assert len(manifest["bench_sha256"]) == 64
@@ -603,7 +602,6 @@ def test_a_row_keeps_the_model_and_leaves_the_hashes_to_the_manifest(
     assert row["explorer_config"] == {"cli": "OpenCode CLI", "model": "fake/default"}
     manifest_config = _sidecar(tmp_path, "opencode")["manifest"]["explorer_config"]
     assert manifest_config["resolved_config_sha256"]
-    assert manifest_config["mcp_servers"] == {"serena": {"type": "local", "enabled": True}}
 
 
 def test_the_manifest_records_no_absolute_local_path(tmp_path, fake_opencode):
