@@ -150,15 +150,8 @@ def run_cli(cmd, *, input=None, timeout=None, capture_output=False, check=False,
 
     POSIX descendants that stay in the new session's process group receive
     SIGINT on cancellation or SIGTERM on other failures, then SIGKILL after
-    a grace period. Windows uses CTRL_BREAK and a job object. Group isolation
-    is required: explicitly disabling start_new_session on POSIX is rejected.
+    a grace period. Windows uses CTRL_BREAK and a job object.
     """
-    if input is not None and kwargs.get("stdin") is not None:
-        raise ValueError("stdin and input arguments may not both be used")
-    if capture_output and any(kwargs.get(name) is not None for name in ("stdout", "stderr")):
-        raise ValueError("stdout and stderr arguments may not be used with capture_output")
-    if kwargs.get("start_new_session") is False:
-        raise ValueError("CLI process-tree cleanup requires a new session")
     cancel = cli_cancel_event.get()
     if cancel is not None and cancel.is_set():
         raise KeyboardInterrupt
@@ -203,18 +196,14 @@ def run_cli(cmd, *, input=None, timeout=None, capture_output=False, check=False,
             remaining = None if deadline is None else max(0, deadline - time.monotonic())
             if remaining == 0:
                 raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
-            # Windows needs short waits to dispatch SIGINT promptly.
+            # Short waits keep cancellation prompt (worker threads, Windows SIGINT).
             interval = _POLL_INTERVAL if remaining is None else min(remaining, _POLL_INTERVAL)
             try:
                 stdout, stderr = process.communicate(input=input, timeout=interval)
-                input = None
                 break
             except subprocess.TimeoutExpired as exc:
                 input = None  # communicate resumes buffered stdin; never resend it.
                 stdout, stderr = exc.output, exc.stderr
-                if deadline is not None and time.monotonic() >= deadline:
-                    exc.timeout = timeout
-                    raise
         if check and process.returncode:
             # Preserve the exit status if cleanup also fails.
             raise subprocess.CalledProcessError(process.returncode, cmd)
