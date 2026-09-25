@@ -31,17 +31,10 @@ Do exactly this, but without modifications. You are planner, so you just provide
 
 @dataclass
 class DevEcoExplorer(BaseCliAgentExplorer):
-    """DevEco Code CLI explorer for local codebases.
-
-    Uses ``deveco run --auto --format json --dir ...`` with the prompt on
-    stdin, and parses the final response for the shared ``RELEVANT_FILES``
-    output contract.
-    """
+    """DevEco Code CLI explorer; parses the shared RELEVANT_FILES contract."""
 
     bin_path: str = "deveco"
-    #: DevEco Code 0.1.9 resolved approval prompts with this flag; 0.1.12
-    #: ignores it and uses OpenCode's ``--auto`` instead. Both flags follow
-    #: ``skip_permissions``.
+    #: Sends ``--dangerously-skip-permissions`` (0.1.9) and ``--auto`` (0.1.12+).
     skip_permissions: bool = True
 
     cli_display_name: ClassVar[str] = "deveco CLI"
@@ -58,14 +51,7 @@ class DevEcoExplorer(BaseCliAgentExplorer):
         "Install and configure the `deveco` binary, or pass --deveco-bin."
     )
     prompt_template: ClassVar[str] = EXPLORE_PROMPT
-    #: DevEco Code is an OpenCode fork and shares its configuration schema and
-    #: agent defaults. Only OpenCode's fallback was verified directly (1.18.29),
-    #: so this is an assumption about the fork — a cheap one: the name is used
-    #: only to read `agent.<name>.model` out of the resolved configuration, and
-    #: when it yields a model the runner names that agent on the command line
-    #: as well, so the model cannot land on a different agent. A profile that
-    #: sets no `agent.build.model`, or a fork that renamed the agent, falls
-    #: through to the top-level `model` and pins nothing.
+    #: OpenCode's fallback agent; not verified on the fork.
     implicit_agent: ClassVar[str | None] = "build"
 
     def build_cmd(self) -> list[str]:

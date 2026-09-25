@@ -112,8 +112,8 @@ def _resolve_repo_path(path: str, repo_path: str | Path) -> str | None:
 
 def _parse_location(location: str) -> ContextRegion | None:
     """Read one decorated location; raise ValueError for an invalid range."""
-    # Explanatory notes follow whitespace; do not remove punctuation
-    # embedded in paths (which could turn an outside path into a local one).
+    # Strip notes only after whitespace; trimming inside a path could make an
+    # outside path local.
     previous = None
     while location != previous:
         previous = location
@@ -154,10 +154,8 @@ def _split_relevant_block(text: str) -> tuple[list[str], str]:
 
 def _sweep_locations(text: str) -> Iterator[str]:
     """Find complete location tokens in prose without treating apostrophes as quotes."""
-    # Tokenize before matching so punctuation in a path cannot cause
-    # an unresolvable absolute path to be accepted as a relative suffix.
-    # Keep whitespace-separated range components in one token, including
-    # a dangling hyphen, so malformed ranges cannot become single lines.
+    # Match whole tokens, so a suffix of an outside path cannot pass as a repo
+    # path, and join spaced-out ranges so a malformed one cannot pass as a line.
     sweep = re.sub(r"[ \t]+:(?=[ \t]*[Ll]?-?\d)", ":", text)
     sweep = re.sub(
         r":[ \t]*[Ll]?-?\d+(?:[ \t]*[-–—][ \t]*(?:[Ll]?-?\d+)?)?",
@@ -183,9 +181,9 @@ def parse_relevant_files(
 ) -> List[ExplorerResult]:
     """Parse whole files, single lines, and ranges from an agent answer.
 
-    With ``repo_path``, only existing files inside that root are accepted.
-    Invalid locations are logged and skipped before applying ``top_k``.
-    A missing or blank root retains legacy normalization for archived output.
+    With ``repo_path``, only existing files inside it are kept; without one,
+    paths are normalized as for archived output. Invalid locations are
+    skipped before ``top_k`` applies.
     """
     if repo_path is not None and not str(repo_path).strip():
         repo_path = None
@@ -569,31 +567,16 @@ def parse_acr_bug_locations(
 
 
 # ── Token usage extraction ─────────────────────────────────────────────
-#
-# Each explorer that touches an LLM parses its provider-specific output for
-# usage fields and reports a TokenUsage into the active per-case collector
-# (see ``usage_collector`` / ``report_usage``).  The runner sums usage per
-# case, writes it into the JSONL rows and prints totals at the end.
 
 
 @dataclass
 class TokenUsage:
     """Token consumption for one exploration case.
 
-    Categories are non-overlapping where the provider allows it:
-    ``input`` excludes cached reads (for OpenAI-style ``prompt_tokens``
-    the cached part is subtracted), ``reasoning`` is the subset of
-    ``output`` reported separately by the provider.
-
-    ``separate_reasoning_tokens`` holds reasoning reported on top of
-    ``output_tokens`` — e.g. Gemini's ``thoughts_token_count`` alongside
-    ``candidates_token_count``, or agent CLIs such as OpenCode whose
-    ``tokens`` object carries ``output`` and ``reasoning`` as sibling
-    buckets (empirically the case for the GLM/Zai line, where reasoning
-    exceeds output, so it cannot be a subset). For OpenAI/Anthropic-style
-    schemas reasoning is already inside ``output`` and stays 0 here, so
-    :attr:`total` never double-counts reasoning and
-    ``(A + B).total == A.total + B.total`` holds for mixed schemas.
+    ``input`` excludes cached reads. ``reasoning`` is normally inside
+    ``output``; ``separate_reasoning_tokens`` is the part reported beside it
+    instead (Gemini thoughts, OpenCode's sibling buckets), so ``total``
+    never counts reasoning twice.
     """
 
     input_tokens: int = 0
@@ -699,17 +682,10 @@ def _scan_usage(obj: Any, usage: TokenUsage, state: dict, depth: int) -> None:
     if depth > _MAX_SCAN_DEPTH:
         return
     if isinstance(obj, dict):
-        # A reasoning field directly inside the same usage object as an
-        # output field is a sibling bucket (opencode ``tokens``, Gemini
-        # ``usageMetadata``), not a subset of ``output``. Nested details
-        # (OpenAI ``completion_tokens_details.reasoning_tokens``) keep the
-        # inclusive OpenAI/Anthropic semantics. Only numeric reasoning
-        # fields count — a text field named "reasoning" must not flip the
-        # schema interpretation.
+        # Numeric reasoning beside output is a separate bucket (OpenCode,
+        # Gemini); nested under details it stays inside output (OpenAI).
         normed_keys = {_norm_key(k) for k in obj}
-        # OpenAI Responses API: input_tokens already includes the cached
-        # portion reported in input_tokens_details (Anthropic's flat
-        # input_tokens excludes cache reads).
+        # OpenAI Responses input_tokens include the cached part; Anthropic's do not.
         input_cache_inclusive = "inputtokensdetails" in normed_keys
         sibling_reasoning = any(
             _norm_key(k) in _REASONING_KEYS
@@ -759,22 +735,8 @@ def _scan_usage(obj: Any, usage: TokenUsage, state: dict, depth: int) -> None:
 
 
 def extract_usage(obj: Any) -> TokenUsage:
-    """Recursively scan parsed JSON for token-usage fields.
-
-    The scan walks the whole payload (it is not restricted to ``usage`` /
-    ``tokens`` containers) and collects the field aliases used by
-    Anthropic, OpenAI and LiteLLM: ``input_tokens``/``prompt_tokens``,
-    ``output_tokens``/``completion_tokens``, ``cache_read_*``/
-    ``cached_tokens``, ``cache_creation_*`` and ``reasoning_tokens``.
-    Only numeric values are collected, so text fields such as a reasoning
-    transcript are ignored.
-
-    Sets ``separate_reasoning_tokens`` when the reasoning tokens are
-    reported on top of ``output`` — Gemini-style candidates/thoughts,
-    opencode-style ``tokens`` objects where ``output`` and ``reasoning``
-    are siblings, or reasoning without any output field — so that
-    :attr:`TokenUsage.total` does not double-count them.
-    """
+    """Sum the numeric token-usage fields anywhere in parsed JSON, across
+    Anthropic, OpenAI, Gemini, LiteLLM and OpenCode spellings."""
     usage = TokenUsage()
     state = {
         "prompt_includes_cache": False,
@@ -790,12 +752,7 @@ def extract_usage(obj: Any) -> TokenUsage:
 
 
 def iter_events(raw: str | None) -> Iterator[dict]:
-    """Yield the JSON objects of a newline-delimited event stream.
-
-    Top-level arrays yield their object items. Blank lines, malformed JSON
-    and non-object items are skipped, so one malformed line never discards
-    the rest of the stream.
-    """
+    """Yield the JSON objects of a newline-delimited event stream, skipping bad lines."""
     for line in (raw or "").splitlines():
         line = line.strip().lstrip("\ufeff").strip()
         if not line.startswith(("{", "[")):
@@ -854,8 +811,7 @@ def report_usage(usage: TokenUsage | None) -> None:
 
 @contextmanager
 def usage_collector() -> Iterator[TokenUsage]:
-    """Collect all ``report_usage`` calls within the block (thread-safe:
-    each thread gets its own collector via contextvars)."""
+    """Collect ``report_usage`` calls in this block; per thread via contextvars."""
     tracker = TokenUsage()
     token = _usage_collector_var.set(tracker)
     try:
@@ -865,12 +821,9 @@ def usage_collector() -> Iterator[TokenUsage]:
 
 
 def register_litellm_usage_callback() -> None:
-    """Report in-process litellm completions (mini-swe-agent, LocAgent, ...)
-    into the active collector. No-op when litellm is not installed.
+    """Report in-process litellm completions into the active collector.
 
-    Litellm dispatches sync success callbacks inline in the calling thread,
-    so the contextvar collector is visible; async-completion paths dispatch
-    on worker pools with fresh contexts and are not covered here.
+    Only sync completions: async callbacks run in a fresh context.
     """
     try:
         import litellm

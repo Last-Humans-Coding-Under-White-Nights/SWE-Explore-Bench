@@ -94,8 +94,7 @@ def _interruptible_pool(workers: int):
             try:
                 pool.shutdown(wait=True, cancel_futures=True)
             except BaseException:
-                # Set the event outside the signal handler, including when
-                # SIGINT arrives during an otherwise normal pool shutdown.
+                # SIGINT can also arrive during a normal shutdown.
                 cancel.set()
                 pool.shutdown(wait=True, cancel_futures=True)
                 raise
@@ -134,12 +133,9 @@ LOCAL_EXPLORERS = {
     "swerank",
 }
 AGENTIC_EXPLORERS = {"claude_code", "cursor", "opencode", "deveco"}
-#: Explorers the runner hands --chunk-size / --chunk-overlap to.
 CHUNKED_EXPLORERS = {"bm25", "tfidf", "potion", "embed", "swerank"}
 ACADEMIC_EXPLORERS = {"autocr", "cosil", "locagent", "orcaloca", "mini_swe_agent", "awe_agent"}
 ALL_EXPLORERS = LOCAL_EXPLORERS | AGENTIC_EXPLORERS | ACADEMIC_EXPLORERS
-#: The sentence-transformers model `rag`, `embed` and `swerank` fall back to.
-#: Named once so the manifest records the model a run actually loaded.
 DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 
 
@@ -157,9 +153,7 @@ def _load_bench_records(path: Path) -> list[dict]:
 
 def _load_issue_map(trajs_dir: Path) -> dict[str, str]:
     issue_map: dict[str, str] = {}
-    # Sorted: two trajectory files can carry the same instance, the first one
-    # read wins, and `rglob` alone would let the filesystem pick the query the
-    # run is given — and with it `issues_sha256`.
+    # Sorted, so a duplicated instance gets the same issue text on every filesystem.
     for p in sorted(trajs_dir.rglob("*.json")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -262,9 +256,7 @@ def _load_existing_results(path: Path) -> list[dict]:
     if not path.is_file():
         return []
     rows = []
-    # A file written before results were UTF-8 everywhere (a Windows run wrote
-    # cp1252) or holding bytes from an agent CLI must not abort the resume:
-    # replace what cannot be decoded and let json.loads keep or skip the line.
+    # Old cp1252 files or stray CLI bytes must not abort a resume.
     with path.open(encoding="utf-8", errors="replace") as f:
         for line in f:
             line = line.strip()
@@ -279,22 +271,12 @@ def _load_existing_results(path: Path) -> list[dict]:
 
 
 def _dump_row(row: dict) -> str:
-    """Serialize one result row as a JSONL line."""
     return json.dumps(row, ensure_ascii=False) + "\n"
 
 
 def _case_ids(rows: list[dict], *, finished_only: bool = False) -> set[str]:
-    """The instance_ids in `rows`, skipping rows that identify no case.
-
-    A missing, null or empty id can be matched against no bench record and
-    re-run for none either, and an empty one would stand in for every bench
-    record that has no id of its own.
-
-    With `finished_only`, a row that records a failure does not count as a
-    case that is done: a timeout or a rate limit is a reason to run it again,
-    not a verdict. A row written before outcomes existed records none and is
-    taken as finished, since there is nothing to say it is not.
-    """
+    """Non-empty instance_ids in `rows`; with `finished_only`, only cases that
+    succeeded or predate recorded outcomes."""
     ids = set()
     for row in rows:
         iid = row.get("instance_id")
@@ -318,32 +300,23 @@ def _dedupe_rows(rows: list[dict], keep: set[str]) -> list[dict]:
 
 @contextlib.contextmanager
 def _atomic_target(path: Path):
-    """Yield a temporary path, then move it over `path` atomically.
-
-    Written through to the real file: an output path symlinked to shared
-    storage must keep pointing there, and the temporary file has to land on
-    the target's filesystem for the replace to be atomic.
-    """
+    """Yield a temporary path beside the symlink-resolved target, then replace it."""
     target = path.resolve()
     tmp = target.with_suffix(target.suffix + ".tmp")
     try:
         yield tmp
         tmp.replace(target)
     finally:
-        # An interrupt or a failed write leaves the half-written file behind,
-        # where the next run would find it beside the results it is not.
         tmp.unlink(missing_ok=True)
 
 
 def _rewrite_results(path: Path, rows: list[dict]) -> None:
-    """Replace a JSONL result file with `rows`, atomically."""
     with _atomic_target(path) as tmp:
         with tmp.open("w", encoding="utf-8") as f:
             f.writelines(_dump_row(row) for row in rows)
 
 
 def _append_row(fh, row: dict) -> None:
-    """Append one result row to an already-open JSONL file and flush it."""
     fh.write(_dump_row(row))
     fh.flush()
 
@@ -353,12 +326,8 @@ class ResumeMismatch(RuntimeError):
 
 
 def _clear_outputs(output_jsonl: str, explorers: list[str], top_k_list: list[int]) -> None:
-    """Empty every result file a fresh run will write, before it writes any.
-
-    Clearing them lazily, as each explorer starts, would let an interrupt leave
-    a later explorer's file holding a previous run's rows — which a subsequent
-    --resume would then adopt as this run's work.
-    """
+    """Empty every result file up front, so an interrupt cannot leave a
+    previous run's rows for a later --resume to adopt."""
     for explorer in explorers:
         for k in top_k_list:
             path = _format_output_path(output_jsonl, explorer, k)
@@ -379,18 +348,10 @@ def _resume_mismatch_exits():
 def _load_resume_state(
     output_jsonl: str, explorer: str, top_k_list: list[int]
 ) -> tuple[dict[int, Path], dict[int, list[dict]]]:
-    """Read an explorer's result files, rejecting a layout it cannot prune.
-
-    `_check_resume` has already validated the output template, so every budget
-    here has a file of its own.
-    """
+    """Read an explorer's result files, rejecting ones it cannot prune."""
     out_paths = {k: _format_output_path(output_jsonl, explorer, k) for k in top_k_list}
     existing = {k: _load_existing_results(path) for k, path in out_paths.items()}
-    # Rows record the explorer that produced them. A file holding another
-    # explorer's rows — an earlier run with a different --explorers set and no
-    # {explorer} in --output — cannot be pruned as this one's: those rows would
-    # be scored as ours and then rewritten away. A row with no explorer
-    # recorded predates the field and is taken as ours.
+    # A row without an explorer predates the field and counts as ours.
     for k, rows in existing.items():
         foreign = sorted(
             {str(r["explorer"]) for r in rows if r.get("explorer") not in (None, explorer)}
@@ -401,11 +362,8 @@ def _load_resume_state(
                 f"{', '.join(foreign)}. Resuming needs one file per explorer; add "
                 f"{{explorer}} to --output, or rerun without --resume."
             )
-    # A budget with no file at all has finished no cases, so pruning against it
-    # would discard every row the other budgets hold. That means the --top-k
-    # set or the --output path changed, not that a write was interrupted.
-    # Existing empty files are valid: a kill during the first case can leave
-    # later budgets empty. Resume must rerun that incomplete case.
+    # A missing budget file means --top-k or --output changed; an empty one is
+    # only an interrupted first case.
     missing = [path for path in out_paths.values() if not path.is_file()]
     if missing and any(existing.values()):
         raise ResumeMismatch(
@@ -427,25 +385,12 @@ def _reconcile_resume_state(
 ) -> tuple[set[str], dict[int, list[dict]], int]:
     """Prune an explorer's result files to the cases finished at every budget.
 
-    Results for one case are written to one file per top_k budget in sequence,
-    so an interrupt in that gap can leave the case in some files but not
-    others. Only cases present in ALL of them count as resumed; the rest are
-    dropped from disk here, so re-running them replaces their rows instead of
-    appending a second set and scoring the case twice. Each existing file is
-    rewritten whole, which also repairs a line left half-written by a hard kill.
+    A case an interrupt left in only some budget files, or (with
+    `retry_failed`) one that failed, is dropped so it reruns. Only selected
+    cases are retried: an unselected failed row would be deleted with nothing
+    to replace it. Rewriting also repairs a half-written last line.
 
-    With `retry_failed`, a case whose row records a failure is dropped the
-    same way and run again. Before outcomes were recorded a failed case wrote
-    no row at all and a resume simply retried it; now that every attempt
-    leaves a row, keeping it would turn one rate limit into a permanent zero.
-
-    Only a case this run selected is retried: dropping a failed row that
-    `--limit` or `--instance-ids` excludes would delete a result — its error
-    and the tokens it spent — that nothing in this run is going to replace.
-    A narrowed run reads less of the file, and it destroys nothing.
-
-    Returns the resumed instance_ids, the surviving rows per top_k, and how
-    many previously failed cases are being run again.
+    Returns the resumed ids, the kept rows per budget and the retry count.
     """
     out_paths, existing = _load_resume_state(output_jsonl, explorer, top_k_list)
     all_ids = set.intersection(*(_case_ids(rows) for rows in existing.values()))
@@ -467,19 +412,12 @@ def _reconcile_resume_state(
     return resumed_ids, kept_per_k, retried
 
 
-# ── run manifest ────────────────────────────────────────────────────────
-#
-# Every result file `X.jsonl` gets a sidecar `X.manifest.json` recording, per
-# explorer, the configuration that produced its rows and a summary of how the
-# cases ended. See README "Run manifest".
+# ── run manifest (README "Run manifest") ────────────────────────────────
 
 MANIFEST_SCHEMA = 1
-#: Manifest fields that identify the experiment; resume refuses to mix rows
-#: across a change to any of them. `recorded` is informational.
+# Resume refuses to mix rows across a change to any of these.
 _MANIFEST_IDENTITY = ("explorer", "bench_sha256", "issues_sha256", "explorer_config")
-#: `explorer_config` keys that say how a value was chosen rather than what ran.
-#: Pinning the model the configuration had already chosen produces the same
-#: argv, so `model_source: config -> flag` is not a different experiment.
+# How the model was chosen, not which one ran.
 _INFORMATIONAL_CONFIG_KEYS = frozenset({"model_source"})
 
 
@@ -489,15 +427,7 @@ def _manifest_path(results_path: Path) -> Path:
 
 @functools.lru_cache(maxsize=None)
 def _git_revision(path: Path) -> str | None:
-    """HEAD of the git work tree rooted exactly at `path`, else None.
-
-    Only a work tree rooted there counts: a snapshot extracted from a tarball
-    inside some other checkout must not report that checkout's HEAD.
-
-    Cached: a checkout holds every case of one repository and nothing moves
-    its HEAD during a run, so this forks `git` once per directory rather than
-    once per case per explorer.
-    """
+    """HEAD of a git work tree rooted exactly at `path` (not an enclosing one), else None."""
     try:
         proc = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "--show-toplevel", "HEAD"],
@@ -518,28 +448,14 @@ def _git_revision(path: Path) -> str | None:
 
 
 def _row_explorer_config(config: dict) -> dict:
-    """What a result row repeats from the explorer's configuration.
-
-    A CLI agent's block is three hashes and a version, identical
-    in every row at every budget; the manifest beside the file records it
-    once. The row keeps the model, which is what a row is read for. Every
-    other explorer's block is a handful of settings and is kept whole.
-    """
+    """The config a row repeats; a CLI agent's hashes and version stay in the manifest."""
     if "cli" in config:
         return {key: config[key] for key in ("cli", "model") if key in config}
     return config
 
 
 def _portable_path(value: str | Path) -> str:
-    """`value` with this machine left out of it.
-
-    A manifest is read on another checkout and another machine, and an
-    absolute path carries a username and a directory layout into a file that
-    is meant to be shareable. A path inside the working directory is recorded
-    relative to it; anything else keeps its name only. A value that is not a
-    path at all — a model id such as `minishlab/potion-base-8M` — is already
-    relative and is left exactly as it is.
-    """
+    """An absolute path made shareable: relative to the cwd, else just its name."""
     path = Path(value)
     if not path.is_absolute():
         return str(value)
@@ -552,18 +468,14 @@ def _portable_path(value: str | Path) -> str:
 def _build_manifests(
     explorer_configs: dict[str, dict], bench_path: Path, issue_map: dict[str, str]
 ) -> dict[str, dict]:
-    """One manifest per explorer. The bench is hashed once, not once each."""
     recorded = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        # Informational: `bench_sha256` is what identifies the bench.
         "bench_path": _portable_path(bench_path),
         "harness_revision": _git_revision(Path(__file__).resolve().parent),
     }
     bench_sha256 = sha256_file(bench_path)
-    # The issue text is every explorer's query, so a changed issue map is a
-    # changed experiment even when the bench and the explorer are identical.
     issues_sha256 = sha256_json(issue_map)
-    # Compare what a JSON round trip gives back, not Python tuples and the like.
+    # Round-tripped, so it compares equal to a manifest read back from disk.
     return json.loads(json.dumps({
         name: {
             "explorer": name,
@@ -577,14 +489,10 @@ def _build_manifests(
 
 
 def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
-    """The identity fields that differ between two manifests, readably.
+    """Identity fields that differ, and those unknown (None) on one side.
 
-    Returns the differences and the fields that could not be compared. A
-    `None` is what a probe writes when it could not run — a CLI that took
-    longer than its timeout to answer `--version` on a loaded machine — and
-    it means *unknown*, not *absent*. Refusing a resume over one slow startup
-    would make the manifest a liability rather than a safeguard, so an
-    unknown on either side is reported and stepped over.
+    A probe that could not run records None, and one slow CLI startup must
+    not refuse every later resume.
     """
     diffs: list[str] = []
     unknown: list[str] = []
@@ -599,7 +507,6 @@ def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
                 if before.get(sub) is None or after.get(sub) is None:
                     unknown.append(f"{key}.{sub}")
                     continue
-                # Qualified, so a bare `model:` says which block it is in.
                 diffs.append(
                     f"{key}.{sub}: {before.get(sub)!r} -> {after.get(sub)!r}"
                 )
@@ -612,8 +519,7 @@ def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
 
 
 def _read_sidecar(path: Path) -> tuple[object, dict]:
-    """A sidecar's schema and `explorers` map; a missing or malformed part
-    reads as the default, since sidecars can be hand-edited."""
+    """A sidecar's schema and `explorers` map; anything malformed reads as the default."""
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
@@ -639,14 +545,11 @@ def _check_resume(
 ) -> list[str]:
     """Reject result files this run cannot continue, before any case runs.
 
-    Checking as each explorer starts would surface a later explorer's problem
-    hours of API spend into the run. Returns what to warn about rather than
-    refuse over: results written before manifests existed are adopted as this
-    configuration's, and a field one side does not know is stepped over.
+    Returns warnings for what is adopted rather than refused: results with no
+    manifest, and fields unknown on one side.
     """
-    # A result row records no top_k, and resume rewrites the files it prunes,
-    # so two budgets (or two explorers) sharing a file would each load the
-    # other's rows as their own and then delete them.
+    # Rows record no top_k, so pruning a shared file would delete another
+    # budget's or explorer's rows.
     seen: dict[Path, tuple[str, int]] = {}
     for explorer in explorers:
         for k in top_k_list:
@@ -664,7 +567,6 @@ def _check_resume(
     warnings: list[str] = []
 
     def warn(message: str) -> None:
-        # Every budget repeats the same finding.
         if message not in warnings:
             warnings.append(message)
 
@@ -674,9 +576,6 @@ def _check_resume(
             results = _format_output_path(output_jsonl, explorer, k)
             sidecar = _manifest_path(results)
             schema, entries = _read_sidecar(sidecar)
-            # A newer harness may record fields this one cannot compare, so
-            # silently continuing its run could mix configurations exactly as
-            # this check exists to prevent.
             if not isinstance(schema, int) or schema > MANIFEST_SCHEMA:
                 raise ResumeMismatch(
                     f"cannot resume {explorer}: {sidecar} records "
@@ -686,8 +585,6 @@ def _check_resume(
                 )
             entry = entries.get(explorer)
             if not isinstance(entry, dict):
-                # Only whether the file holds anything matters here, so ask
-                # the filesystem rather than parsing every row back.
                 if results.is_file() and results.stat().st_size:
                     warn(
                         f"{explorer}: the existing results record no run manifest; "
@@ -714,14 +611,9 @@ def _check_resume(
 def _write_manifests(
     output_jsonl: str, manifests: dict[str, dict], top_k_list: list[int], *, fresh: bool
 ) -> None:
-    """Record each explorer's manifest beside its result files.
-
-    A fresh run starts every sidecar over; a resumed one keeps the entries it
-    has already checked, summaries included, and adds the missing ones.
-    """
-    # Grouped, because an --output template without {explorer} or {k} maps
-    # several of them onto one sidecar, and a fresh write must not reset the
-    # file between two explorers that share it.
+    """Record each explorer's manifest beside its result files; a resumed run
+    keeps the entries it already has."""
+    # Grouped, since explorers or budgets can share one sidecar.
     by_sidecar: dict[Path, dict[str, dict]] = {}
     for explorer, manifest in manifests.items():
         for k in top_k_list:
@@ -763,8 +655,7 @@ class _Tally:
             self._totals[k][m] += (row.get("metrics") or {}).get(m, 0.0)
 
     def add_usage(self, usage: TokenUsage | None) -> None:
-        # A zeroed usage is a tool that reported nothing; counting it would
-        # depress the per-case mean.
+        # A zeroed usage would depress the per-case mean.
         if usage is not None and usage.has_any():
             self.usage.add(usage)
             self.usage_cases += 1
@@ -775,17 +666,8 @@ class _Tally:
 
 
 def _summarize(tally: _Tally, k: int, cases: int) -> dict:
-    """How the cases at one budget ended, for the manifest and the console.
-
-    Every attempted case has a row, failures included, so `attempted` is the
-    row count and the averages are over all of them. Rows written before
-    outcomes were recorded count as `unrecorded`.
-
-    `cases` is the number of cases this run selected, after `--limit` and
-    `--instance-ids`, so the cases that were never attempted are what is left
-    over. Counting this run's skips instead would restart at zero on every
-    `--resume` and shrink the completion rate's denominator.
-    """
+    """How the cases at one budget ended; `cases` is the run's selection, so
+    the completion rate keeps its denominator across resumes."""
     rows = tally.rows[k]
     outcomes: dict[str, int] = {}
     for row in rows:
@@ -805,7 +687,6 @@ def _summarize(tally: _Tally, k: int, cases: int) -> dict:
 
 
 def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
-    """Print the per-explorer total token usage table (in/out/cache/reasoning)."""
     if not totals.has_any():
         console.print(f"  [dim]Token usage: no data reported by {name}[/dim]")
         return
@@ -824,8 +705,7 @@ def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
     values = totals.to_dict()
     table.add_row(str(cases), *[f"{values[key]:,}" for _, key in display])
     console.print(table)
-    # Printed even when zero: a run that used sub-agents but reports 0 here means
-    # the session-store query fell back to the stdout count.
+    # Printed even when zero: 0 with sub-agents means the session query fell back.
     sub = totals.subagent or TokenUsage()
     console.print(
         f"  [dim]of which sub-agents: {sub.total:,} "
@@ -835,7 +715,6 @@ def _print_usage_table(name: str, totals: TokenUsage, cases: int) -> None:
 
 
 def _report_explorer(name: str, tally: _Tally, cases: int, output_jsonl: str | None) -> None:
-    """Summary table, outcomes and usage; the summary also goes to the manifest."""
     table = Table(title=f"{name} Results", show_lines=False)
     table.add_column("top_k", justify="right")
     table.add_column("Eval", justify="right")
@@ -872,7 +751,6 @@ class _CaseRun(NamedTuple):
     repo_revision: str | None
 
 
-#: A failure's message is kept in its row, cut to this length.
 MAX_ERROR_CHARS = 4000
 
 
@@ -1094,7 +972,6 @@ def run(
         raise typer.Exit(1)
     set_log_level(log_level)
 
-    # Capture token usage from in-process LLM calls (litellm-based agents).
     register_litellm_usage_callback()
 
     records = _load_bench_records(bench_path)
@@ -1163,17 +1040,11 @@ def run(
         return None
 
     def _case_repo_dir(rec: dict) -> Path | None:
-        """The checkout for a case, or None when the case may be skipped.
-
-        Without `--skip-missing-repo` a missing checkout is a failure like any
-        other: scored as an empty answer, and recorded with its reason rather
-        than as an empty success.
-        """
+        """The checkout for a case, None to skip it, or a failure with --no-skip-missing-repo."""
         rd = _get_repo_dir(rec)
         if rd is not None or skip_missing_repo:
             return rd
-        # `_portable_path`, because this message becomes a row's `error`: an
-        # absolute path would carry a username into a published result file.
+        # Portable: this becomes a row's `error`, and rows may be published.
         where = f" under {_portable_path(repos_root)}" if repos_root is not None else ""
         raise ExplorerFailure(ERROR, f"no checkout for {rec.get('instance_id', '')}{where}")
 
@@ -1377,28 +1248,18 @@ def run(
             agent=agent,
         )
 
-    #: The CLI-agent explorers, by name. They share their whole run-time
-    #: wiring — `describe()` for the manifest, `--model`/`--agent` on every
-    #: run — so naming the pair once is all a third one should have to add.
     CLI_AGENT_MAKERS = {"opencode": make_opencode, "deveco": make_deveco}
-    #: What --opencode-agent / --deveco-agent named, if anything.
     CLI_AGENT_FLAG_AGENTS = {"opencode": opencode_agent, "deveco": deveco_agent}
 
-    # Filled before the first case runs (see explorer_configs below). A CLI
-    # agent's model comes from there, so every run names it with --model,
-    # including one the configuration chose.
+    # Filled before the first case runs; every CLI run pins the model it names.
     explorer_configs: dict[str, dict] = {}
 
     def _cli_agent_method(name: str) -> Callable[[dict], list[tuple[str, int, int]] | None]:
         def method(rec: dict) -> list[tuple[str, int, int]] | None:
             config = explorer_configs[name]
             model = config["model"] or ""
-            # When the model came from an agent, name that agent on the
-            # command line as well. The CLI would otherwise be free to run a
-            # different one — the fallback agent is a documented default, not
-            # a promise — and the model would land on an agent that never
-            # chose it. Nothing is pinned when the model came from elsewhere,
-            # so a CLI whose fallback we have not verified keeps its own.
+            # Pin the agent only when its model was chosen; otherwise the CLI
+            # keeps its own fallback.
             agent = config["agent"] if config.get("model_source") == "agent" else ""
             return _agentic_method(
                 rec, lambda rd: CLI_AGENT_MAKERS[name](rd, model, agent or CLI_AGENT_FLAG_AGENTS[name])
@@ -1509,10 +1370,6 @@ def run(
 
     # ── configuration each explorer runs with (the run manifest) ──
     def _explorer_config(name: str) -> dict:
-        # Chunking decides what a retrieval explorer can return at all, so it
-        # identifies the experiment as much as a model does for an agent —
-        # and where a model scores those chunks, it identifies it just as
-        # much, so both go in.
         if name in CHUNKED_EXPLORERS:
             config = {"chunk_size": chunk_size, "chunk_overlap": chunk_overlap}
             if name == "embed":
@@ -1528,7 +1385,6 @@ def run(
                 config.update(model_path=_portable_path(potion_model_path))
             return config
         if name == "rag":
-            # Whole files, no chunking — the embedding model is the setting.
             return {"model": embed_model or DEFAULT_EMBED_MODEL}
         if name == "codenib":
             return {
@@ -1582,9 +1438,7 @@ def run(
             _clear_outputs(output_jsonl, explorer_names, top_k_list)
         _write_manifests(output_jsonl, manifests, top_k_list, fresh=not resume)
     total_records = len(records)
-    #: The cases this run is about, after --limit and any id filter. Both the
-    #: completion rate's denominator and the rows resume counts come from it,
-    #: so the two cannot disagree.
+    # After --limit and id filters; the completion rate and resume both use it.
     selected_ids = {r.get("instance_id") for r in records}
 
     for name in explorer_names:
@@ -1592,7 +1446,6 @@ def run(
 
         # ── resume: load existing results and skip completed instances ──
         tally = _Tally(top_k_list)
-        # Cases with no repository checkout: never run, so never scored.
         not_attempted = 0
         resumed_ids: set[str] = set()
 
@@ -1608,12 +1461,7 @@ def run(
                     f"run again; their rows are replaced (--no-retry-failed keeps "
                     f"them)[/yellow]"
                 )
-            # Pre-load the surviving rows into the tally, but only for
-            # the cases this run selected: --limit or --instance-ids can name
-            # fewer than the file holds, and a total counting rows the
-            # selection excludes reports on an experiment nobody asked for
-            # (and a completion rate above 100%). The rows themselves stay in
-            # the file — a narrowed selection reads less, it destroys nothing.
+            # Only selected cases count; a narrowed run leaves other rows on disk.
             for k in top_k_list:
                 for r in kept_per_k[k]:
                     if r.get("instance_id") in selected_ids:
@@ -1643,23 +1491,16 @@ def run(
         )
 
         def _eval_one(rec: dict) -> _CaseRun:
-            """Run one instance. A failure is a result too: see `_CaseRun`."""
             iid = rec.get("instance_id", "")
             case_t0 = time.perf_counter()
             outcome, error = SUCCESS, None
-            # The collector is entered before the try, so the handler can
-            # always read what it collected, however early the case failed.
             with usage_collector() as tracker:
                 try:
                     preds = method(rec)
                     if preds is None:
-                        # No checkout, so nothing ran: never scored, and not a
-                        # success either.
                         outcome = NOT_ATTEMPTED
                 except Exception as e:
-                    # A classified failure already says what it was, in a
-                    # sentence written to be read in a result file; anything
-                    # else is a crash, where the exception type is the news.
+                    # An unclassified crash needs its exception type.
                     outcome = classify_failure(e)
                     error = (
                         str(e) if isinstance(e, ExplorerFailure)
@@ -1693,16 +1534,10 @@ def run(
                 result_per_k[k] = scores
             return result_per_k
 
-        # Open output files for incremental append: a fresh run cleared them
-        # above, and --resume continues what is on disk. An --output template
-        # without {k} points several budgets at one file, so they share a
-        # single handle rather than overwriting each other.
+        # Budgets sharing one file share one handle.
         out_files: dict[int, object] = {}
         out_handles = contextlib.ExitStack()
         if output_jsonl:
-            # Opening is staged: a budget file that cannot be opened (no
-            # permission, no space) closes the handles already opened for the
-            # earlier budgets instead of leaking them.
             with contextlib.ExitStack() as opening:
                 by_path: dict[Path, object] = {}
                 for k in top_k_list:
@@ -1718,12 +1553,7 @@ def run(
         row_config = _row_explorer_config(explorer_configs[name])
 
         def _record_result(case: _CaseRun) -> tuple[float, float, float]:
-            """Score and write one attempted case, whatever its outcome.
-
-            A failed case is scored as an empty answer, exactly like a run that
-            answered with nothing, so a failure never costs less than a bad
-            answer (README "Case outcomes").
-            """
+            """Score and write one attempted case; a failure scores as an empty answer."""
             iid, preds, usage = case.iid, case.preds, case.usage
             scores_per_k = _score_instance(iid, preds)
             row_usage = usage.to_dict() if usage is not None else None
@@ -1832,7 +1662,6 @@ def run(
         except KeyboardInterrupt:
             interrupted = True
         finally:
-            # Close output files (budgets may share one handle)
             out_handles.close()
 
         if interrupted:
