@@ -377,40 +377,13 @@ def _resume_mismatch_exits():
         raise typer.Exit(1) from exc
 
 
-def _check_resume_outputs(
-    output_jsonl: str, explorers: list[str], top_k_list: list[int]
-) -> None:
-    """Reject an --output template that gives one file to several budgets.
-
-    A result row records no top_k, and resume rewrites the files it prunes, so
-    two budgets (or two explorers) sharing a file would each load the other's
-    rows as their own and then delete them. Only a template that keeps them
-    apart can be resumed.
-    """
-    seen: dict[Path, tuple[str, int]] = {}
-    for explorer in explorers:
-        for k in top_k_list:
-            path = _format_output_path(output_jsonl, explorer, k)
-            if path in seen:
-                other_explorer, other_k = seen[path]
-                raise ResumeMismatch(
-                    f"cannot resume: --output {output_jsonl!r} writes both "
-                    f"({other_explorer}, top_k={other_k}) and ({explorer}, top_k={k}) "
-                    f"to {path}. Resuming needs one file per explorer and budget; "
-                    f"add {{explorer}}/{{k}} to --output, or rerun without --resume."
-                )
-            seen[path] = (explorer, k)
-
-
 def _load_resume_state(
     output_jsonl: str, explorer: str, top_k_list: list[int]
 ) -> tuple[dict[int, Path], dict[int, list[dict]]]:
     """Read an explorer's result files, rejecting a layout it cannot prune.
 
-    Callers validate the output template with `_check_resume_outputs` first, so
-    every budget here has a file of its own. Reads nothing back into the run:
-    this only decides whether the files on disk belong to the run being
-    resumed, so it is safe to call for every explorer before any of them runs.
+    `_check_resume` has already validated the output template, so every budget
+    here has a file of its own.
     """
     out_paths = {k: _format_output_path(output_jsonl, explorer, k) for k in top_k_list}
     existing = {k: _load_existing_results(path) for k, path in out_paths.items()}
@@ -443,19 +416,6 @@ def _load_resume_state(
             f"to start these files over."
         )
     return out_paths, existing
-
-
-def _check_resume_files(
-    output_jsonl: str, explorers: list[str], top_k_list: list[int]
-) -> None:
-    """Reject every explorer's unresumable output files before the run starts.
-
-    Reconciling lazily, as each explorer starts, would surface a later
-    explorer's bad layout only once the run reached it — hours of exploration
-    and API spend into a run whose only remedy is to start the files over.
-    """
-    for explorer in explorers:
-        _load_resume_state(output_jsonl, explorer, top_k_list)
 
 
 def _reconcile_resume_state(
@@ -617,28 +577,17 @@ def _build_manifests(
     # The issue text is every explorer's query, so a changed issue map is a
     # changed experiment even when the bench and the explorer are identical.
     issues_sha256 = _json_sha256(issue_map)
-    return {
-        name: _build_manifest(name, config, bench_sha256, issues_sha256, recorded)
-        for name, config in explorer_configs.items()
-    }
-
-
-def _build_manifest(
-    explorer: str,
-    explorer_config: dict,
-    bench_sha256: str,
-    issues_sha256: str,
-    recorded: dict,
-) -> dict:
-    manifest = {
-        "explorer": explorer,
-        "bench_sha256": bench_sha256,
-        "issues_sha256": issues_sha256,
-        "explorer_config": explorer_config,
-        "recorded": recorded,
-    }
     # Compare what a JSON round trip gives back, not Python tuples and the like.
-    return json.loads(json.dumps(manifest))
+    return json.loads(json.dumps({
+        name: {
+            "explorer": name,
+            "bench_sha256": bench_sha256,
+            "issues_sha256": issues_sha256,
+            "explorer_config": config,
+            "recorded": recorded,
+        }
+        for name, config in explorer_configs.items()
+    }))
 
 
 def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
@@ -676,66 +625,85 @@ def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
     return diffs, unknown
 
 
-def _read_sidecar(path: Path) -> dict:
+def _read_sidecar(path: Path) -> tuple[object, dict]:
+    """A sidecar's schema and `explorers` map; a missing or malformed part
+    reads as the default, since sidecars can be hand-edited."""
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _sidecar_entries(data: dict) -> dict:
-    """The `explorers` map of a sidecar, or an empty one.
-
-    Sidecars are read from disk and can be hand-edited, so the field is not
-    necessarily the map this harness wrote.
-    """
+        data = None
+    if not isinstance(data, dict):
+        return MANIFEST_SCHEMA, {}
     entries = data.get("explorers")
-    return entries if isinstance(entries, dict) else {}
+    if not isinstance(entries, dict):
+        entries = {}
+    return data.get("schema", MANIFEST_SCHEMA), entries
 
 
-def _write_sidecar(path: Path, data: dict) -> None:
+def _write_sidecar(path: Path, entries: dict) -> None:
+    data = {"schema": MANIFEST_SCHEMA, "explorers": entries}
     with _atomic_target(path) as tmp:
         tmp.write_text(
             json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
         )
 
 
-def _check_resume_manifests(
-    output_jsonl: str, manifests: dict[str, dict], top_k_list: list[int]
+def _check_resume(
+    output_jsonl: str, explorers: list[str], manifests: dict[str, dict], top_k_list: list[int]
 ) -> list[str]:
-    """Reject resuming rows that another configuration produced.
+    """Reject result files this run cannot continue, before any case runs.
 
-    Returns what the run should say about the comparison rather than refuse
-    over: results that carry no manifest at all (written before manifests
-    existed) are adopted as this configuration's, and a field one side does
-    not know is stepped over.
+    Checking as each explorer starts would surface a later explorer's problem
+    hours of API spend into the run. Returns what to warn about rather than
+    refuse over: results written before manifests existed are adopted as this
+    configuration's, and a field one side does not know is stepped over.
     """
+    # A result row records no top_k, and resume rewrites the files it prunes,
+    # so two budgets (or two explorers) sharing a file would each load the
+    # other's rows as their own and then delete them.
+    seen: dict[Path, tuple[str, int]] = {}
+    for explorer in explorers:
+        for k in top_k_list:
+            path = _format_output_path(output_jsonl, explorer, k)
+            if path in seen:
+                other_explorer, other_k = seen[path]
+                raise ResumeMismatch(
+                    f"cannot resume: --output {output_jsonl!r} writes both "
+                    f"({other_explorer}, top_k={other_k}) and ({explorer}, top_k={k}) "
+                    f"to {path}. Resuming needs one file per explorer and budget; "
+                    f"add {{explorer}}/{{k}} to --output, or rerun without --resume."
+                )
+            seen[path] = (explorer, k)
+
     warnings: list[str] = []
-    adopted: set[str] = set()
-    reported: set[tuple[str, str]] = set()
+
+    def warn(message: str) -> None:
+        # Every budget repeats the same finding.
+        if message not in warnings:
+            warnings.append(message)
+
     for explorer, manifest in manifests.items():
+        _load_resume_state(output_jsonl, explorer, top_k_list)
         for k in top_k_list:
             results = _format_output_path(output_jsonl, explorer, k)
-            sidecar = _read_sidecar(_manifest_path(results))
+            sidecar = _manifest_path(results)
+            schema, entries = _read_sidecar(sidecar)
             # A newer harness may record fields this one cannot compare, so
             # silently continuing its run could mix configurations exactly as
             # this check exists to prevent.
-            schema = sidecar.get("schema", MANIFEST_SCHEMA)
             if not isinstance(schema, int) or schema > MANIFEST_SCHEMA:
                 raise ResumeMismatch(
-                    f"cannot resume {explorer}: {_manifest_path(results)} records "
+                    f"cannot resume {explorer}: {sidecar} records "
                     f"manifest schema {schema!r}, and this harness understands "
                     f"{MANIFEST_SCHEMA}. Use a newer harness, write to a new "
                     f"--output, or rerun without --resume."
                 )
-            entry = _sidecar_entries(sidecar).get(explorer)
+            entry = entries.get(explorer)
             if not isinstance(entry, dict):
                 # Only whether the file holds anything matters here, so ask
                 # the filesystem rather than parsing every row back.
-                if explorer not in adopted and results.is_file() and results.stat().st_size:
-                    adopted.add(explorer)
-                    warnings.append(
+                if results.is_file() and results.stat().st_size:
+                    warn(
                         f"{explorer}: the existing results record no run manifest; "
                         f"assuming they match this configuration"
                     )
@@ -749,10 +717,7 @@ def _check_resume_manifests(
                     f"without --resume to start these files over."
                 )
             for field in unknown:
-                if (explorer, field) in reported:
-                    continue
-                reported.add((explorer, field))
-                warnings.append(
+                warn(
                     f"{explorer}: {field} is unknown on one side — a probe that "
                     f"could not run records no value — so it was not compared"
                 )
@@ -776,26 +741,24 @@ def _write_manifests(
             sidecar = _manifest_path(_format_output_path(output_jsonl, explorer, k))
             by_sidecar.setdefault(sidecar, {})[explorer] = manifest
     for sidecar, wanted in by_sidecar.items():
-        data = {} if fresh else _read_sidecar(sidecar)
-        entries = _sidecar_entries(data)
+        entries = {} if fresh else _read_sidecar(sidecar)[1]
         for explorer, manifest in wanted.items():
             if fresh or not isinstance(entries.get(explorer), dict):
                 entries[explorer] = {"manifest": manifest, "summary": {}}
         sidecar.parent.mkdir(parents=True, exist_ok=True)
-        _write_sidecar(sidecar, {"schema": MANIFEST_SCHEMA, "explorers": entries})
+        _write_sidecar(sidecar, entries)
 
 
 def _write_summary(results_path: Path, explorer: str, k: int, summary: dict) -> None:
     sidecar = _manifest_path(results_path)
-    data = _read_sidecar(sidecar)
-    entry = _sidecar_entries(data).get(explorer)
+    entries = _read_sidecar(sidecar)[1]
+    entry = entries.get(explorer)
     if not isinstance(entry, dict):
         return
-    summaries = entry.get("summary")
-    if not isinstance(summaries, dict):
-        summaries = entry["summary"] = {}
-    summaries[str(k)] = summary
-    _write_sidecar(sidecar, data)
+    if not isinstance(entry.get("summary"), dict):
+        entry["summary"] = {}
+    entry["summary"][str(k)] = summary
+    _write_sidecar(sidecar, entries)
 
 
 def _summarize(
@@ -1583,9 +1546,7 @@ def run(
     if output_jsonl:
         if resume:
             with _resume_mismatch_exits():
-                _check_resume_outputs(output_jsonl, explorer_names, top_k_list)
-                _check_resume_files(output_jsonl, explorer_names, top_k_list)
-                for warning in _check_resume_manifests(output_jsonl, manifests, top_k_list):
+                for warning in _check_resume(output_jsonl, explorer_names, manifests, top_k_list):
                     console.print(f"[yellow]{warning}[/yellow]")
         else:
             _clear_outputs(output_jsonl, explorer_names, top_k_list)
