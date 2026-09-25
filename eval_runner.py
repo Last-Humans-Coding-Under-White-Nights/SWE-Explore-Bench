@@ -9,7 +9,6 @@ Usage:
 from __future__ import annotations
 
 import contextlib
-import functools
 import json
 import os
 import signal
@@ -425,7 +424,6 @@ def _manifest_path(results_path: Path) -> Path:
     return results_path.with_name(results_path.stem + ".manifest.json")
 
 
-@functools.lru_cache(maxsize=None)
 def _git_revision(path: Path) -> str | None:
     """HEAD of a git work tree rooted exactly at `path` (not an enclosing one), else None."""
     try:
@@ -445,13 +443,6 @@ def _git_revision(path: Path) -> str | None:
     except OSError:
         return None
     return lines[1]
-
-
-def _row_explorer_config(config: dict) -> dict:
-    """The config a row repeats; a CLI agent's hashes and version stay in the manifest."""
-    if "cli" in config:
-        return {key: config[key] for key in ("cli", "model") if key in config}
-    return config
 
 
 def _portable_path(value: str | Path) -> str:
@@ -518,18 +509,14 @@ def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
     return diffs, unknown
 
 
-def _read_sidecar(path: Path) -> tuple[object, dict]:
-    """A sidecar's schema and `explorers` map; anything malformed reads as the default."""
+def _read_sidecar(path: Path) -> dict:
+    """A sidecar's `explorers` map; anything malformed reads as empty."""
     try:
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except (OSError, ValueError):
-        data = None
-    if not isinstance(data, dict):
-        return MANIFEST_SCHEMA, {}
-    entries = data.get("explorers")
-    if not isinstance(entries, dict):
-        entries = {}
-    return data.get("schema", MANIFEST_SCHEMA), entries
+        return {}
+    entries = data.get("explorers") if isinstance(data, dict) else None
+    return entries if isinstance(entries, dict) else {}
 
 
 def _write_sidecar(path: Path, entries: dict) -> None:
@@ -574,16 +561,7 @@ def _check_resume(
         _load_resume_state(output_jsonl, explorer, top_k_list)
         for k in top_k_list:
             results = _format_output_path(output_jsonl, explorer, k)
-            sidecar = _manifest_path(results)
-            schema, entries = _read_sidecar(sidecar)
-            if not isinstance(schema, int) or schema > MANIFEST_SCHEMA:
-                raise ResumeMismatch(
-                    f"cannot resume {explorer}: {sidecar} records "
-                    f"manifest schema {schema!r}, and this harness understands "
-                    f"{MANIFEST_SCHEMA}. Use a newer harness, write to a new "
-                    f"--output, or rerun without --resume."
-                )
-            entry = entries.get(explorer)
+            entry = _read_sidecar(_manifest_path(results)).get(explorer)
             if not isinstance(entry, dict):
                 if results.is_file() and results.stat().st_size:
                     warn(
@@ -620,7 +598,7 @@ def _write_manifests(
             sidecar = _manifest_path(_format_output_path(output_jsonl, explorer, k))
             by_sidecar.setdefault(sidecar, {})[explorer] = manifest
     for sidecar, wanted in by_sidecar.items():
-        entries = {} if fresh else _read_sidecar(sidecar)[1]
+        entries = {} if fresh else _read_sidecar(sidecar)
         for explorer, manifest in wanted.items():
             if fresh or not isinstance(entries.get(explorer), dict):
                 entries[explorer] = {"manifest": manifest, "summary": {}}
@@ -630,7 +608,7 @@ def _write_manifests(
 
 def _write_summary(results_path: Path, explorer: str, k: int, summary: dict) -> None:
     sidecar = _manifest_path(results_path)
-    entries = _read_sidecar(sidecar)[1]
+    entries = _read_sidecar(sidecar)
     entry = entries.get(explorer)
     if not isinstance(entry, dict):
         return
@@ -748,7 +726,6 @@ class _CaseRun(NamedTuple):
     seconds: float
     outcome: str
     error: str | None
-    repo_revision: str | None
 
 
 MAX_ERROR_CHARS = 4000
@@ -1508,7 +1485,6 @@ def run(
                     )
                     preds = []
                     sys.stderr.write(f"\n  [ERROR] {name} {iid} ({outcome}): {e}\n")
-            repo_dir = _get_repo_dir(rec)
             return _CaseRun(
                 iid,
                 preds,
@@ -1516,7 +1492,6 @@ def run(
                 time.perf_counter() - case_t0,
                 outcome,
                 error[:MAX_ERROR_CHARS] if error else None,
-                _git_revision(repo_dir) if repo_dir is not None else None,
             )
 
         def _score_instance(iid: str, preds: list[tuple[str, int, int]]) -> dict[int, dict[str, float]]:
@@ -1550,8 +1525,6 @@ def run(
                     out_files[k] = by_path[out_path]
                 out_handles = opening.pop_all()
 
-        row_config = _row_explorer_config(explorer_configs[name])
-
         def _record_result(case: _CaseRun) -> tuple[float, float, float]:
             """Score and write one attempted case; a failure scores as an empty answer."""
             iid, preds, usage = case.iid, case.preds, case.usage
@@ -1568,10 +1541,7 @@ def run(
                     "metrics": scores_per_k[k],
                     "num_regions": min(len(preds), k),
                     "token_usage": row_usage,
-                    "repo_revision": case.repo_revision,
                 }
-                if row_config:
-                    row["explorer_config"] = row_config
                 tally.add_row(k, row)
                 if k in out_files:
                     _append_row(out_files[k], row)

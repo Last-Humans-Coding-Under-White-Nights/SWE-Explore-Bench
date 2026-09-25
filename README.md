@@ -177,8 +177,6 @@ Explorer subprocesses use a shared process-tree runner. On timeout or cancellati
 
 A case whose repository checkout is missing is not attempted (with the default `--skip-missing-repo`): it gets no row and is counted as `not_attempted` in the summary below. With `--no-skip-missing-repo` the case is run after all, and the missing checkout is a failure like any other: an `error` row naming the path, scored as an empty answer.
 
-Rows also record `repo_revision`, the git HEAD of the case's checkout when it is a git work tree (`null` for snapshots extracted from archives), and `explorer_config` for explorers that have one. For a CLI agent the row keeps the CLI and the model; the hashes and the version are identical in every row and live in the manifest beside the file.
-
 #### Run manifest
 
 Beside every result file `X.jsonl` the runner writes `X.manifest.json`:
