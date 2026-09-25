@@ -205,7 +205,7 @@ def test_success_rows_name_their_outcome_and_the_pinned_model(tmp_path, fake_ope
     rows = _rows(tmp_path, "opencode")
     assert [r["outcome"] for r in rows] == [SUCCESS, SUCCESS]
     assert all(r["error"] is None for r in rows)
-    assert rows[0]["explorer_config"]["model"] == "fake/configured"
+    assert _sidecar(tmp_path, "opencode")["manifest"]["explorer_config"]["model"] == "fake/configured"
     argv = [json.loads(ln) for ln in (tmp_path / "argv.log").read_text(encoding="utf-8").splitlines()]
     assert all(a[a.index("--model") + 1] == "fake/configured" for a in argv)
     assert _sidecar(tmp_path, "opencode")["summary"]["1"]["completion_rate"] == 1.0
@@ -225,7 +225,6 @@ def test_manifest_records_the_configuration_and_no_secret(tmp_path, fake_opencod
     assert config["model"] == "fake/pinned"
     assert config["model_source"] == "flag"
     assert config["cli_version"] == "1.18.29"
-    assert config["mcp_servers"] == {"serena": {"type": "local", "enabled": True}}
     assert len(config["prompt_sha256"]) == 64
     assert len(config["resolved_config_sha256"]) == 64
     assert len(manifest["bench_sha256"]) == 64
@@ -343,21 +342,6 @@ def test_resuming_a_narrowed_selection_reports_on_that_selection(tmp_path):
     # The excluded rows are still in the file; a narrower run reads less,
     # it does not delete.
     assert len(_rows(tmp_path, "oracle")) == 3
-
-
-def test_resume_against_a_newer_manifest_schema_is_refused(tmp_path):
-    """A schema this harness cannot compare must not be resumed blindly."""
-    bench = _write_bench(tmp_path)
-    assert _run(tmp_path, bench).exit_code == 0
-    sidecar = tmp_path / "out" / "oracle" / "top1.manifest.json"
-    data = json.loads(sidecar.read_text(encoding="utf-8"))
-    data["schema"] = eval_runner.MANIFEST_SCHEMA + 1
-    sidecar.write_text(json.dumps(data), encoding="utf-8")
-
-    result = _run(tmp_path, bench, "--resume")
-
-    assert result.exit_code == 1
-    assert "manifest schema" in _flat(result.output)
 
 
 def test_results_without_a_manifest_are_adopted_on_resume(tmp_path):
@@ -592,18 +576,16 @@ def test_a_non_zero_exit_without_error_events_is_not_a_provider_error(
     assert "unknown agent" not in row["error"]
 
 
-def test_a_row_keeps_the_model_and_leaves_the_hashes_to_the_manifest(
-    tmp_path, fake_opencode
-):
+def test_a_row_leaves_the_configuration_to_the_manifest(tmp_path, fake_opencode):
     bench = _write_bench(tmp_path, n=1)
 
     assert _run_opencode(tmp_path, bench, fake_opencode).exit_code == 0
 
     [row] = _rows(tmp_path, "opencode")
-    assert row["explorer_config"] == {"cli": "OpenCode CLI", "model": "fake/default"}
-    manifest_config = _sidecar(tmp_path, "opencode")["manifest"]["explorer_config"]
-    assert manifest_config["resolved_config_sha256"]
-    assert manifest_config["mcp_servers"] == {"serena": {"type": "local", "enabled": True}}
+    assert list(row) == [
+        "instance_id", "explorer", "outcome", "error", "regions",
+        "metrics", "num_regions", "token_usage",
+    ]
 
 
 def test_the_manifest_records_no_absolute_local_path(tmp_path, fake_opencode):

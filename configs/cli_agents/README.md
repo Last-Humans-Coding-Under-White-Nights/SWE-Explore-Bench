@@ -73,15 +73,11 @@ to whichever agent the CLI would otherwise have run. Nothing is pinned when
 the model came from the flag or from the top-level `model`, so a CLI whose
 fallback agent we have not verified keeps its own choice.
 
-The profile directory is also written to by the CLI: OpenCode installs plugin
-dependencies into it on first use and drops a `.gitignore` naming what it
-generated. `profile_sha256` skips exactly those names, so a dependency
-install is not mistaken for a configuration change.
-
 It also records the CLI version, the resolved configuration (hashed, with
-credentials redacted) and the MCP servers in a run manifest beside the
-results, and `--resume` refuses to continue results produced by a different
-configuration. See "Run manifest" in the top-level README.
+credentials redacted) and a hash of the files under `checkout/` in a run
+manifest beside the results, and `--resume` refuses to continue results
+produced by a different configuration. See "Run manifest" in the top-level
+README.
 
 The explorers redirect `HOME` to an empty temporary directory for every run,
 so the user's own `~/.config/opencode` and `~/.config/deveco` are never read.

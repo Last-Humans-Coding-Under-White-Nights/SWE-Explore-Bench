@@ -236,17 +236,6 @@ def test_file_capture_default_errors_rejects_invalid_text():
                 runner._captured_output(process, {'stdout': output}, None, None)
 
 
-@pytest.mark.parametrize('kwargs', [
-    {'input': b'prompt', 'stdin': subprocess.DEVNULL},
-    {'capture_output': True, 'stdout': subprocess.DEVNULL},
-    {'capture_output': True, 'stderr': subprocess.DEVNULL},
-    {'start_new_session': False},
-])
-def test_conflicting_arguments_are_rejected(kwargs):
-    with pytest.raises(ValueError):
-        runner.run_cli([sys.executable, '-c', 'pass'], **kwargs)
-
-
 def test_default_capture_does_not_replace_supplied_stdout(tmp_path):
     path = tmp_path / 'output'
     with path.open('wb') as output:

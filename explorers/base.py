@@ -33,9 +33,7 @@ BINARY_NOT_FOUND = "binary_not_found"
 #: An exception no explorer classified (a crash, a missing config file, ...).
 ERROR = "error"
 OUTCOMES = (SUCCESS, TIMEOUT, PROVIDER_ERROR, INVALID_OUTPUT, BINARY_NOT_FOUND, ERROR)
-#: A case that was never run, because it has no checkout and the run allows
-#: skipping one. Not a row outcome — an unattempted case is never scored, so
-#: it has no row; the manifest's summary counts it instead.
+#: No checkout, so never run and never scored; only the summary counts it.
 NOT_ATTEMPTED = "not_attempted"
 
 
