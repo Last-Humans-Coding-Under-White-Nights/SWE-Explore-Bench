@@ -320,6 +320,28 @@ def _append_row(fh, row: dict) -> None:
     fh.flush()
 
 
+def _output_clash(output_jsonl: str, explorers: list[str], top_k_list: list[int]) -> str | None:
+    """Why --output gives two explorers or budgets one result file or manifest, if it does.
+
+    Rows record no top_k, so rows sharing a file could not be told apart.
+    """
+    seen: dict[Path, tuple[str, int]] = {}
+    for explorer in explorers:
+        for k in top_k_list:
+            # Resolved, so `..` or a symlinked directory cannot hide a shared file.
+            sidecar = _manifest_path(_format_output_path(output_jsonl, explorer, k)).resolve()
+            if sidecar in seen:
+                other_explorer, other_k = seen[sidecar]
+                return (
+                    f"--output {output_jsonl!r} gives ({other_explorer}, top_k={other_k}) "
+                    f"and ({explorer}, top_k={k}) the same result file or manifest "
+                    f"({sidecar}). Each explorer and budget needs its own; keep "
+                    f"{{explorer}} and {{k}} in the file name, before the extension."
+                )
+            seen[sidecar] = (explorer, k)
+    return None
+
+
 class ResumeMismatch(RuntimeError):
     """The existing result files do not match the run being resumed."""
 
@@ -528,29 +550,13 @@ def _write_sidecar(path: Path, entries: dict) -> None:
 
 
 def _check_resume(
-    output_jsonl: str, explorers: list[str], manifests: dict[str, dict], top_k_list: list[int]
+    output_jsonl: str, manifests: dict[str, dict], top_k_list: list[int]
 ) -> list[str]:
     """Reject result files this run cannot continue, before any case runs.
 
     Returns warnings for what is adopted rather than refused: results with no
     manifest, and fields unknown on one side.
     """
-    # Rows record no top_k, so pruning a shared file would delete another
-    # budget's or explorer's rows.
-    seen: dict[Path, tuple[str, int]] = {}
-    for explorer in explorers:
-        for k in top_k_list:
-            path = _format_output_path(output_jsonl, explorer, k)
-            if path in seen:
-                other_explorer, other_k = seen[path]
-                raise ResumeMismatch(
-                    f"cannot resume: --output {output_jsonl!r} writes both "
-                    f"({other_explorer}, top_k={other_k}) and ({explorer}, top_k={k}) "
-                    f"to {path}. Resuming needs one file per explorer and budget; "
-                    f"add {{explorer}}/{{k}} to --output, or rerun without --resume."
-                )
-            seen[path] = (explorer, k)
-
     warnings: list[str] = []
 
     def warn(message: str) -> None:
@@ -590,20 +596,15 @@ def _write_manifests(
     output_jsonl: str, manifests: dict[str, dict], top_k_list: list[int], *, fresh: bool
 ) -> None:
     """Record each explorer's manifest beside its result files; a resumed run
-    keeps the entries it already has."""
-    # Grouped, since explorers or budgets can share one sidecar.
-    by_sidecar: dict[Path, dict[str, dict]] = {}
+    keeps the entry it already has."""
     for explorer, manifest in manifests.items():
         for k in top_k_list:
             sidecar = _manifest_path(_format_output_path(output_jsonl, explorer, k))
-            by_sidecar.setdefault(sidecar, {})[explorer] = manifest
-    for sidecar, wanted in by_sidecar.items():
-        entries = {} if fresh else _read_sidecar(sidecar)
-        for explorer, manifest in wanted.items():
+            entries = {} if fresh else _read_sidecar(sidecar)
             if fresh or not isinstance(entries.get(explorer), dict):
                 entries[explorer] = {"manifest": manifest, "summary": {}}
-        sidecar.parent.mkdir(parents=True, exist_ok=True)
-        _write_sidecar(sidecar, entries)
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            _write_sidecar(sidecar, entries)
 
 
 def _write_summary(results_path: Path, explorer: str, k: int, summary: dict) -> None:
@@ -910,14 +911,13 @@ def run(
     ),
     output_jsonl: str | None = typer.Option(
         None, "--output", "-o",
-        help="Save per-instance results to JSONL. Supports {explorer} and {k} "
-        "placeholders; leaving one out points several explorers or budgets at a "
-        "single file, which --resume cannot continue.",
+        help="Save per-instance results to JSONL, one file per explorer and "
+        "budget: use the {explorer} and {k} placeholders.",
     ),
     resume: bool = typer.Option(
         False, "--resume/--no-resume",
         help="Resume from existing output files, skipping instances already scored "
-        "at every top_k. Needs one output file per explorer and budget.",
+        "at every top_k.",
     ),
 ) -> None:
     """Run evaluation for one or more explorers."""
@@ -978,6 +978,10 @@ def run(
     unknown = set(explorer_names) - ALL_EXPLORERS
     if unknown:
         console.print(f"[red]Unknown explorers: {unknown}[/red]")
+        raise typer.Exit(1)
+    clash = _output_clash(output_jsonl, explorer_names, top_k_list) if output_jsonl else None
+    if clash:
+        console.print(f"[red]{clash}[/red]")
         raise typer.Exit(1)
     if "codenib" in explorer_names:
         try:
@@ -1409,7 +1413,7 @@ def run(
     if output_jsonl:
         if resume:
             with _resume_mismatch_exits():
-                for warning in _check_resume(output_jsonl, explorer_names, manifests, top_k_list):
+                for warning in _check_resume(output_jsonl, manifests, top_k_list):
                     console.print(f"[yellow]{warning}[/yellow]")
         else:
             _clear_outputs(output_jsonl, explorer_names, top_k_list)
@@ -1509,20 +1513,14 @@ def run(
                 result_per_k[k] = scores
             return result_per_k
 
-        # Budgets sharing one file share one handle.
         out_files: dict[int, object] = {}
         out_handles = contextlib.ExitStack()
         if output_jsonl:
             with contextlib.ExitStack() as opening:
-                by_path: dict[Path, object] = {}
                 for k in top_k_list:
                     out_path = _format_output_path(output_jsonl, name, k)
-                    if out_path not in by_path:
-                        out_path.parent.mkdir(parents=True, exist_ok=True)
-                        by_path[out_path] = opening.enter_context(
-                            out_path.open("a", encoding="utf-8")
-                        )
-                    out_files[k] = by_path[out_path]
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_files[k] = opening.enter_context(out_path.open("a", encoding="utf-8"))
                 out_handles = opening.pop_all()
 
         def _record_result(case: _CaseRun) -> tuple[float, float, float]:
