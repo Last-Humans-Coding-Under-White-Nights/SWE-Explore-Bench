@@ -311,7 +311,7 @@ def _collect_with_db(monkeypatch, db_stdout, stdout_text="", seen=None, env=None
             seen.update(cmd=cmd, **kw)
         return subprocess.CompletedProcess(cmd, 0, stdout=db_stdout)
 
-    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fake_run)
+    monkeypatch.setattr("explorers._cli_agent_base.run_cli", fake_run)
     return OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")._collect_usage(
         stdout_text, env={"HOME": "/tmp/isolated-home"} if env is None else env
     )
@@ -398,7 +398,7 @@ def test_deveco_usage_queries_its_session_store(monkeypatch):
         seen.update(cmd=cmd)
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(rows))
 
-    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", fake_run)
+    monkeypatch.setattr("explorers._cli_agent_base.run_cli", fake_run)
 
     usage = DevEcoExplorer(repo_root=Path("."), bin_path="dv-test")._collect_usage("", env={})
 

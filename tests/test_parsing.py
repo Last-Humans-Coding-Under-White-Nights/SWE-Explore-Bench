@@ -198,7 +198,7 @@ class RelevantFilesTest(unittest.TestCase):
     def test_cli_passes_actual_root(self):
         output = f'RELEVANT_FILES:\n- {self.root}/{self.page}:10'
         with patch(
-            'explorers._cli_agent_base.subprocess.run',
+            'explorers._cli_agent_base.run_cli',
             return_value=subprocess.CompletedProcess([], 0, output, ''),
         ):
             results = OpenCodeExplorer(repo_root=self.root).explore(
@@ -214,7 +214,7 @@ class RelevantFilesTest(unittest.TestCase):
         for cls, module in ((ClaudeCodeExplorer, 'claude_code'),
                             (CursorAgentExplorer, 'cursor_agent')):
             with self.subTest(explorer=cls.__name__):
-                with patch(f'explorers.{module}.subprocess.run',
+                with patch(f'explorers.{module}.run_cli',
                            return_value=subprocess.CompletedProcess([], 0, output, '')):
                     results = cls(repo_root=self.root).explore(
                         instance_id='case', query='find bug',

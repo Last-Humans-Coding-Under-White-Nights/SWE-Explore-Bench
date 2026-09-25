@@ -17,8 +17,10 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Event
 from typing import List
 
+from ._cli_process import cli_cancel_event, run_cli
 from .base import Explorer, ExplorerResult
 from ._paths import awe_agent_path as _default_awe_agent_path
 from .parsing import parse_relevant_files
@@ -44,6 +46,25 @@ Do exactly this, but without modifications. You are planner, so you just provide
 """
 
 
+class _CommandCancellation(Event):
+    """A command can be cancelled by its asyncio task or evaluation pool."""
+
+    def __init__(self, parent: Event | None):
+        super().__init__()
+        self.parent = parent
+
+    def is_set(self) -> bool:
+        return super().is_set() or (self.parent is not None and self.parent.is_set())
+
+
+class _CommandCancelled(Exception):
+    """Carry cancellation across an executor without stopping its event loop."""
+
+    def __init__(self, interrupt: KeyboardInterrupt):
+        super().__init__("Bash command cancelled")
+        self.interrupt = interrupt
+
+
 class LocalBashSession:
     """Minimal RuntimeSession that executes bash commands on the local filesystem.
 
@@ -56,30 +77,55 @@ class LocalBashSession:
     async def execute(self, command: str, cwd: str | None = None,
                       timeout: int | None = None, env: dict | None = None):
         _cwd = cwd or self._workdir
+        cancel = _CommandCancellation(cli_cancel_event.get())
 
         def _run():
-            result = subprocess.run(
-                ["bash", "-c", command],
-                cwd=_cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout or 60,
-                env={**os.environ, **(env or {})},
-                encoding="utf-8",
-                errors="replace",
-            )
-            return result.returncode, result.stdout, result.stderr
+            token = cli_cancel_event.set(cancel)
+            try:
+                result = run_cli(
+                    ["bash", "-c", command],
+                    cwd=_cwd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout or 60,
+                    env={**os.environ, **(env or {})},
+                    encoding="utf-8",
+                    errors="replace",
+                )
+                return result.returncode, result.stdout, result.stderr
+            except KeyboardInterrupt as exc:
+                raise _CommandCancelled(exc) from exc
+            finally:
+                cli_cancel_event.reset(token)
 
-        loop = asyncio.get_event_loop()
+        task = asyncio.create_task(asyncio.to_thread(_run))
         try:
-            exit_code, stdout, stderr = await loop.run_in_executor(None, _run)
-        except subprocess.TimeoutExpired:
+            exit_code, stdout, stderr = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancel.set()
+            # Cancelling an asyncio task cannot stop its executor thread.
+            # Wait for the process cleanup before handing cancellation back.
+            try:
+                await task
+            except Exception:
+                pass
+            raise
+        except _CommandCancelled as exc:
+            raise exc.interrupt
+        except subprocess.TimeoutExpired as exc:
             # Import here to avoid circular import at module load time
             awe_root = str(_AWE_AGENT_ROOT)
             if awe_root not in sys.path:
                 sys.path.insert(0, awe_root)
             from awe_agent.core.runtime.types import ExecutionResult
-            return ExecutionResult(stdout="", stderr="Command timed out", exit_code=1)
+            stdout = exc.stdout or ""
+            stderr = exc.stderr or ""
+            if isinstance(stdout, bytes):
+                stdout = stdout.decode("utf-8", errors="replace")
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode("utf-8", errors="replace")
+            diagnostic = f"Command timed out\n{stderr}" if stderr else "Command timed out"
+            return ExecutionResult(stdout=stdout, stderr=diagnostic, exit_code=1)
 
         awe_root = str(_AWE_AGENT_ROOT)
         if awe_root not in sys.path:

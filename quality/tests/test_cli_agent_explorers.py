@@ -1,7 +1,7 @@
 """Table-driven tests for the agentic CLI explorers.
 
 The CLIs are external binaries absent from CI, so every case mocks
-``subprocess.run``. A new explorer is one row in ``CLI_EXPLORER_CASES``.
+the shared CLI process runner. A new explorer is one row in ``CLI_EXPLORER_CASES``.
 """
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         repo_root=Path(repo), bin_path=case.bin_path, timeout=12
                     )
                     with patch(
-                        "explorers._cli_agent_base.subprocess.run", side_effect=fake_run
+                        "explorers._cli_agent_base.run_cli", side_effect=fake_run
                     ):
                         results = explorer.explore(
                             instance_id="inst-1", query="broken behavior", top_k=5
@@ -149,7 +149,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         repo_root=Path(repo), bin_path=case.bin_path
                     )
                     with patch.dict(os.environ, inherited, clear=True), patch(
-                        "explorers._cli_agent_base.subprocess.run", side_effect=fake_run
+                        "explorers._cli_agent_base.run_cli", side_effect=fake_run
                     ):
                         explorer.explore(instance_id="inst-1", query="issue")
 
@@ -181,7 +181,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         config_dir=unnormalised,
                     )
                     with patch(
-                        "explorers._cli_agent_base.subprocess.run", side_effect=fake_run
+                        "explorers._cli_agent_base.run_cli", side_effect=fake_run
                     ):
                         explorer.explore(instance_id="inst-1", query="issue")
 
@@ -201,7 +201,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         repo_root=Path(repo), bin_path=case.bin_path,
                         config_dir=Path(cfg),
                     )
-                    with patch("explorers._cli_agent_base.subprocess.run") as run:
+                    with patch("explorers._cli_agent_base.run_cli") as run:
                         with self.assertRaises(FileNotFoundError):
                             explorer.explore(instance_id="inst-1", query="issue")
                     run.assert_not_called()
@@ -214,7 +214,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         repo_root=Path(repo), bin_path="missing-binary"
                     )
                     with patch(
-                        "explorers._cli_agent_base.subprocess.run",
+                        "explorers._cli_agent_base.run_cli",
                         side_effect=FileNotFoundError,
                     ):
                         with self.assertRaisesRegex(
@@ -233,7 +233,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         [], 3, stdout="partial out", stderr="boom"
                     )
                     with patch(
-                        "explorers._cli_agent_base.subprocess.run", return_value=completed
+                        "explorers._cli_agent_base.run_cli", return_value=completed
                     ):
                         with self.assertRaisesRegex(RuntimeError, "rc=3"):
                             explorer.explore(instance_id="inst-1", query="issue")
@@ -248,7 +248,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                     )
                     completed = subprocess.CompletedProcess([], 0, stdout="  \n", stderr="")
                     with patch(
-                        "explorers._cli_agent_base.subprocess.run", return_value=completed
+                        "explorers._cli_agent_base.run_cli", return_value=completed
                     ):
                         with self.assertRaises(ExplorerFailure) as caught:
                             explorer.explore(instance_id="inst-1", query="issue")
@@ -271,7 +271,7 @@ class CliAgentExplorerContractTest(unittest.TestCase):
                         prompt_additions="Prefer the LSP hub.",
                     )
                     with patch(
-                        "explorers._cli_agent_base.subprocess.run", side_effect=fake_run
+                        "explorers._cli_agent_base.run_cli", side_effect=fake_run
                     ):
                         explorer.explore(instance_id="inst-1", query="issue")
 
@@ -330,7 +330,7 @@ class CliAgentOutcomeTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as repo:
             explorer = explorer_cls(repo_root=Path(repo), bin_path="agent-test", timeout=5)
-            with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+            with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
                 with usage_collector() as tracker:
                     try:
                         return explorer.explore(instance_id="inst-1", query="issue"), tracker
@@ -388,7 +388,7 @@ class CliAgentOutcomeTest(unittest.TestCase):
                 out = "[]" if cmd[1] == "db" else stdout
                 return subprocess.CompletedProcess(cmd, 0, out, "")
 
-            with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+            with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
                 results = explorer.explore(instance_id="inst-1", query="issue")
         self.assertEqual(results[0].regions[0].path, "src/main.py")
 
@@ -477,7 +477,7 @@ class CliAgentDescribeTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, json.dumps(resolved, indent=2), "")
 
         explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test", **kwargs)
-        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+        with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
             return explorer.describe(), calls
 
     def test_describe_records_the_resolved_configuration(self) -> None:
@@ -573,7 +573,7 @@ class CliAgentDescribeTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, noisy, "")
 
         explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")
-        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+        with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
             described = explorer.describe()
         clean, _ = self._describe(resolved)
         self.assertEqual(described["model"], "swe-explore/gpt-5.4")
@@ -662,7 +662,7 @@ class CliAgentDescribeTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, noisy, "")
 
         explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test")
-        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+        with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
             described = explorer.describe()
         clean, _ = self._describe(resolved)
         self.assertEqual(described["model"], "swe-explore/gpt-5.4")
@@ -772,7 +772,7 @@ class CheckoutSeedingTest(unittest.TestCase):
             return subprocess.CompletedProcess(cmd, 0, stdout=ANSWER_EVENT, stderr="")
 
         explorer = OpenCodeExplorer(repo_root=self.repo, bin_path="x", config_dir=self.cfg)
-        with patch("explorers._cli_agent_base.subprocess.run", side_effect=fake_run):
+        with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
             explorer.explore(instance_id="inst-1", query="issue")
         return seen
 

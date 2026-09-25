@@ -11,7 +11,6 @@ import hashlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from explorers._cli_agent_base import BaseCliAgentExplorer
+from explorers._cli_process import run_cli as _REAL_RUN
 from explorers.deveco import DevEcoExplorer
 from explorers.opencode import OpenCodeExplorer
 from explorers.parsing import iter_events, usage_collector
@@ -51,10 +51,6 @@ WHOLE_FILE = -1
 VARIANTS = ("arkts", "arkts-no-mcp")
 PAGE = "entry/src/main/ets/pages/Index.ets"
 IMPORTED_MODULE = "entry/src/main/ets/model/DataSource.ets"
-
-# The explorer module shares this module object, so keep the original before
-# the recorder replaces the attribute for the duration of a run.
-_REAL_RUN = subprocess.run
 
 Region = tuple[str, int, int]
 
@@ -261,7 +257,7 @@ def run_case(
     explorer: BaseCliAgentExplorer, case: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> Run:
     recorder = RecordingRun()
-    monkeypatch.setattr("explorers._cli_agent_base.subprocess.run", recorder)
+    monkeypatch.setattr("explorers._cli_agent_base.run_cli", recorder)
     with usage_collector() as usage:
         results = explorer.explore(
             instance_id=case["instance_id"], query=case["query"], top_k=5,
