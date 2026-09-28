@@ -555,6 +555,36 @@ class CliAgentDescribeTest(unittest.TestCase):
         self.assertEqual(seeded["seed_sha256"], unrelated["seed_sha256"])
         self.assertNotEqual(seeded["seed_sha256"], edited["seed_sha256"])
 
+    def test_profile_is_compared_when_debug_config_cannot_answer(self) -> None:
+        def fake_run(cmd, **kw):  # type: ignore[no-untyped-def]
+            return subprocess.CompletedProcess(cmd, 1, "", "unknown command")
+
+        def describe(profile: dict) -> dict:
+            with tempfile.TemporaryDirectory() as tmp:
+                (Path(tmp) / "opencode.json").write_text(json.dumps(profile), encoding="utf-8")
+                explorer = OpenCodeExplorer(repo_root=Path("."), bin_path="oc-test", config_dir=Path(tmp))
+                with patch("explorers._cli_agent_base.run_cli", side_effect=fake_run):
+                    return explorer.describe()
+
+        denied = describe({"model": "m/one", "apiKey": "sk-one", "permission": {"edit": "deny"}})
+        rotated = describe({"model": "m/one", "apiKey": "sk-two", "permission": {"edit": "deny"}})
+        allowed = describe({"model": "m/one", "apiKey": "sk-one", "permission": {"edit": "allow"}})
+        self.assertIsNone(denied["resolved_config_sha256"])
+        self.assertEqual(denied, rotated)
+        self.assertNotEqual(denied["profile_config_sha256"], allowed["profile_config_sha256"])
+
+    def test_seed_hash_ignores_key_rotation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "opencode.json").write_text('{"model": "m/one"}', encoding="utf-8")
+            seed = root / "checkout" / ".mcp.json"
+            seed.parent.mkdir()
+            seed.write_text('{"headers": {"Authorization": "Bearer sk-one"}}', encoding="utf-8")
+            first, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+            seed.write_text('{"headers": {"Authorization": "Bearer sk-two"}}', encoding="utf-8")
+            rotated, _ = self._describe(self._resolved(self.SECRET), config_dir=root)
+        self.assertEqual(first["seed_sha256"], rotated["seed_sha256"])
+
     def test_trailing_output_after_the_config_is_tolerated(self) -> None:
         """A plugin's "Done in 12ms" line must not cost us the configuration."""
         resolved = self._resolved(self.SECRET)

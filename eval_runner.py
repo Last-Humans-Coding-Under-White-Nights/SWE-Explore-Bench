@@ -1399,8 +1399,8 @@ def run(
             if cfg["resolved_config_sha256"] is None:
                 console.print(
                     f"[yellow]{name}: the CLI did not answer `debug config`, so its "
-                    f"resolved configuration is unknown and cannot be compared on a "
-                    f"later --resume[/yellow]"
+                    f"resolved configuration is unknown; a later --resume compares only "
+                    f"the profile's own files[/yellow]"
                 )
             if not cfg["model"]:
                 console.print(

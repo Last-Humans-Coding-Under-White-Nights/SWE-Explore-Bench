@@ -237,6 +237,15 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sha256_redacted_file(path: Path) -> str:
+    if path.suffix.lower() == ".json":
+        try:
+            return sha256_json(redact_config(json.loads(path.read_text(encoding="utf-8"))))
+        except (OSError, ValueError):
+            pass
+    return sha256_file(path)
+
+
 @dataclass
 class BaseCliAgentExplorer(Explorer):
     """Template-method base for explorers that drive a coding-agent CLI."""
@@ -342,7 +351,8 @@ class BaseCliAgentExplorer(Explorer):
             if stdout is not None:
                 resolved = _first_json_object(stdout)
         # `resolved or ...` would discard a configuration that resolves to {}.
-        config = resolved if resolved is not None else self._profile_config() or {}
+        profile = self._profile_config()
+        config = resolved if resolved is not None else profile or {}
         # An agent's own model outranks the top-level one, the fallback agent's too.
         agent = self.agent or config.get("default_agent") or self.implicit_agent or None
         agents = config.get("agent") if isinstance(config.get("agent"), dict) else {}
@@ -367,8 +377,11 @@ class BaseCliAgentExplorer(Explorer):
             "resolved_config_sha256": (
                 sha256_json(redact_config(resolved)) if resolved is not None else None
             ),
+            "profile_config_sha256": (
+                sha256_json(redact_config(profile)) if profile is not None else None
+            ),
             "seed_sha256": sha256_json(
-                {rel: sha256_file(path) for rel, path in self._seed_files().items()}
+                {rel: _sha256_redacted_file(path) for rel, path in self._seed_files().items()}
             ),
         }
 
