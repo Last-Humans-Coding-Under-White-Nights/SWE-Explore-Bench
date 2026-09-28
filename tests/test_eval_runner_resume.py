@@ -201,15 +201,30 @@ def test_resume_repairs_a_line_left_half_written(tmp_path):
     assert torn.read_text(encoding="utf-8").endswith("\n")
 
 
-def test_budgets_sharing_one_output_file_stay_parseable(tmp_path):
-    """An --output template without {k} points every budget at one file."""
+@pytest.mark.parametrize(("explorers", "top_k", "template"), [
+    (("oracle",), "1,2", "results.jsonl"),
+    (("oracle", "random"), "1", "top{k}.jsonl"),
+    (("oracle", "oracle"), "1", "{explorer}{k}.jsonl"),
+    (("oracle", "random"), "1", "{explorer}/../top{k}.jsonl"),
+    # Distinct result files, but one manifest: the sidecar is named by the stem.
+    (("oracle",), "1,2", "results.{k}"),
+])
+@pytest.mark.parametrize("resume", [(), ("--resume",)])
+def test_an_output_that_shares_a_file_is_refused_before_anything_runs(
+    tmp_path, explorers, top_k, template, resume
+):
+    """A row records no top_k, so rows sharing a file could not be told apart."""
     bench = _write_bench(tmp_path / "bench.jsonl")
-    shared = tmp_path / "results.jsonl"
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "results.jsonl").write_text("kept\n", encoding="utf-8")
 
-    result = _run(bench, tmp_path, output=shared)
+    result = _run(bench, out, *resume, explorers=explorers, top_k=top_k, output=out / template)
 
-    assert result.exit_code == 0
-    assert len(_rows(shared)) == 8  # 4 cases x 2 budgets, none overwritten
+    assert result.exit_code == 1
+    assert "Each explorer and budget needs its own" in _flat(result.stdout)
+    assert [p.name for p in out.iterdir()] == ["results.jsonl"]
+    assert (out / "results.jsonl").read_text(encoding="utf-8") == "kept\n"
 
 
 def test_results_round_trip_non_ascii_paths_as_utf8(tmp_path):
@@ -239,41 +254,6 @@ def test_results_round_trip_non_ascii_paths_as_utf8(tmp_path):
     assert eval_runner._load_existing_results(written) == _rows(written)
 
 
-def test_resume_refuses_when_budgets_share_one_output_file(tmp_path):
-    """A row records no top_k, so budgets sharing a file cannot be told apart."""
-    bench = _write_bench(tmp_path / "bench.jsonl")
-    shared = tmp_path / "results.jsonl"
-    assert _run(bench, tmp_path, output=shared).exit_code == 0
-    before = shared.read_text(encoding="utf-8")
-
-    result = _run(bench, tmp_path, "--resume", output=shared)
-
-    assert result.exit_code == 1
-    assert "one file per explorer and budget" in _flat(result.stdout)
-    assert shared.read_text(encoding="utf-8") == before
-
-
-def _seed_two_explorers_into_one_file(tmp_path: Path) -> tuple[Path, Path, Path, str]:
-    """Run oracle and random into a single {explorer}-less output file."""
-    bench = _write_bench(tmp_path / "bench.jsonl")
-    out = tmp_path / "out"
-    shared = out / "top{k}.jsonl"
-    assert _run(bench, out, explorers=("oracle", "random"), top_k="1", output=shared).exit_code == 0
-    written = out / "top1.jsonl"
-    return bench, out, shared, written.read_text(encoding="utf-8")
-
-
-def test_resume_refuses_when_explorers_share_one_output_file(tmp_path):
-    """Without {explorer}, one explorer would score and then delete another's rows."""
-    bench, out, shared, before = _seed_two_explorers_into_one_file(tmp_path)
-
-    result = _run(bench, out, "--resume", explorers=("oracle", "random"), top_k="1", output=shared)
-
-    assert result.exit_code == 1
-    assert {r["explorer"] for r in _rows(out / "top1.jsonl")} == {"oracle", "random"}
-    assert (out / "top1.jsonl").read_text(encoding="utf-8") == before
-
-
 def test_loader_ignores_lines_that_are_not_result_rows(tmp_path):
     path = tmp_path / "top1.jsonl"
     path.write_text('123\n"a string"\nnull\n{"instance_id": "case-1"}\n[]\n', encoding="utf-8")
@@ -299,8 +279,12 @@ def test_resume_counts_token_usage_once_per_case(tmp_path):
 
 
 def test_resume_refuses_a_file_holding_another_explorers_rows(tmp_path):
-    """A file written by an earlier, wider --explorers set is not ours to prune."""
-    bench, out, shared, before = _seed_two_explorers_into_one_file(tmp_path)
+    """A file an earlier run of another explorer wrote is not ours to prune."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    shared = out / "top{k}.jsonl"
+    assert _run(bench, out, explorers=("random",), top_k="1", output=shared).exit_code == 0
+    before = (out / "top1.jsonl").read_text(encoding="utf-8")
 
     result = _run(bench, out, "--resume", top_k="1", output=shared)
 
