@@ -150,11 +150,14 @@ uv run python eval_runner.py \
 - A case counts as done only when it is present in *every* `top_k` file. One that an interrupt left in some files but not others is dropped from disk and re-run, so it contributes exactly one row per budget and a resumed run reports the same numbers as an uninterrupted one.
 - A case whose row records a failure is run again and its rows are replaced: a timeout or a rate limit is a reason to retry, not a verdict. Only a case the run selected is retried, so a failed row that `--limit` or `--instance-ids` excludes is left alone rather than deleted by a run that was never going to replace it. `--no-retry-failed` keeps those rows and treats the case as done. A row written before outcomes were recorded says nothing about how the case ended and is taken as done either way.
 - Each explorer and budget needs a file of its own, so keep `{explorer}` and `{k}` in `--output` before the extension (a run whose `--output` would make two of them share a file or its manifest is refused before it starts). A result row records no `top_k`, so budgets sharing one file could not be told apart.
+- A file whose manifest `summary` names another `top_k` that `--output` puts in that same file is refused on resume, since its rows cannot be split back into budgets. That catches a file an older harness wrote for several budgets at once (`-k 1,2 -o r.jsonl`), and one resumed under a different `--top-k`. The summary is the only trace such a file leaves, so one with no manifest, or one interrupted before its first summary was written, cannot be recognised and is resumed as if it held this budget. Rerun those without `--resume`.
 - If a `top_k` file is missing entirely — you added a budget, or changed `--output` — the run stops instead of discarding the rows the other budgets already hold.
 - Every explorer's files are checked before the first one starts, so an unresumable layout stops the run right away rather than once the run reaches that explorer.
 - The configuration must match the one that produced the files (see [Run manifest](#run-manifest)). If it differs — another model, CLI version, prompt, profile, bench file, issue map or retrieval setting — the run stops and lists what changed, qualified by the block it came from (`explorer_config.model: ...`), instead of blending two experiments into one table. Result files written before manifests existed carry none; they are adopted with a warning. A field one side does not know — the CLI could not answer `debug config` on that run, so it recorded `null` — is reported and stepped over rather than read as a change, so one slow startup does not cost every later resume.
 
 Without `--resume` the output files are rewritten from scratch.
+
+`--output` accepts only the `{explorer}` and `{k}` placeholders; any other is refused at startup, as is an explorer named twice in `--explorers` (names are case-insensitive).
 
 #### Case outcomes
 

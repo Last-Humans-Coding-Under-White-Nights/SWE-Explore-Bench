@@ -8,10 +8,12 @@ Usage:
 """
 from __future__ import annotations
 
+import collections
 import contextlib
 import json
 import os
 import signal
+import string
 import subprocess
 import sys
 import time
@@ -248,6 +250,35 @@ def _parse_top_k_list(value: str) -> list[int]:
 def _format_output_path(template: str, explorer: str, k: int) -> Path:
     """Format output path template with {explorer} and {k} placeholders."""
     return Path(template.format(explorer=explorer, k=k))
+
+
+def _template_fields(template: str) -> Iterable[str]:
+    """Every field in a format string, including those nested in a format spec."""
+    for _, field, spec, _ in string.Formatter().parse(template):
+        if field is not None:
+            yield field
+            yield from _template_fields(spec or "")
+
+
+def _output_template_error(
+    template: str, explorers: list[str], top_k_list: list[int]
+) -> str | None:
+    """Why --output cannot name every result file of this run, if it cannot."""
+    supported = "only {explorer} and {k} are supported"
+    try:
+        for field in _template_fields(template):
+            if field not in ("explorer", "k"):
+                return (
+                    f"--output {template!r} uses unknown placeholder {{{field}}}; "
+                    f"{supported}."
+                )
+        # A format spec can depend on the value: `{k:c}` fits k=1, not k=2000000.
+        for explorer in explorers:
+            for k in top_k_list:
+                _format_output_path(template, explorer, k)
+    except (ValueError, OverflowError) as exc:
+        return f"--output {template!r} is not a valid template ({exc}); {supported}."
+    return None
 
 
 def _load_existing_results(path: Path) -> list[dict]:
@@ -531,6 +562,29 @@ def _manifest_diff(old: dict, new: dict) -> tuple[list[str], list[str]]:
     return diffs, unknown
 
 
+def _budget_mismatch(output_jsonl: str, explorer: str, k: int, summary) -> str | None:
+    """Which other budgets the manifest says wrote this budget's file, if any.
+
+    Rows record no top_k, so the summary is the only trace of a file written
+    for several budgets before one file per budget was enforced
+    (`-k 1,2 -o r.jsonl`), or of one resumed under a different --top-k.
+    """
+    if not isinstance(summary, dict):
+        return None
+    results = _format_output_path(output_jsonl, explorer, k)
+    others = sorted(
+        other for other in summary
+        if other != str(k) and other.isdecimal()
+        and _format_output_path(output_jsonl, explorer, int(other)) == results
+    )
+    if not others:
+        return None
+    budgets = ", ".join(f"top_k={other}" for other in others)
+    if str(k) in summary:
+        return f"rows from several budgets ({budgets} as well as top_k={k})"
+    return f"{budgets} rows, not top_k={k}"
+
+
 def _read_sidecar(path: Path) -> dict:
     """A sidecar's `explorers` map; anything malformed reads as empty."""
     try:
@@ -568,13 +622,23 @@ def _check_resume(
         for k in top_k_list:
             results = _format_output_path(output_jsonl, explorer, k)
             entry = _read_sidecar(_manifest_path(results)).get(explorer)
+            has_rows = results.is_file() and results.stat().st_size > 0
             if not isinstance(entry, dict):
-                if results.is_file() and results.stat().st_size:
+                if has_rows:
                     warn(
                         f"{explorer}: the existing results record no run manifest; "
                         f"assuming they match this configuration"
                     )
                 continue
+            mismatch = has_rows and _budget_mismatch(
+                output_jsonl, explorer, k, entry.get("summary")
+            )
+            if mismatch:
+                raise ResumeMismatch(
+                    f"cannot resume {explorer}: by its manifest, {results} holds "
+                    f"{mismatch}, and rows record no top_k to tell them apart. Write "
+                    f"to a new --output, or rerun without --resume to start it over."
+                )
             diffs, unknown = _manifest_diff(entry.get("manifest") or {}, manifest)
             if diffs:
                 raise ResumeMismatch(
@@ -934,6 +998,26 @@ def run(
     max_top_k = max(top_k_list)
     console.print(f"[dim]top_k values: {top_k_list}[/dim]")
 
+    explorer_names = [x.strip().lower() for x in explorers]
+    unknown = set(explorer_names) - ALL_EXPLORERS
+    if unknown:
+        console.print(f"[red]Unknown explorers: {unknown}[/red]")
+        raise typer.Exit(1)
+    repeated = sorted(n for n, c in collections.Counter(explorer_names).items() if c > 1)
+    if repeated:
+        console.print(
+            f"[red]Explorer {', '.join(repeated)} is given more than once in "
+            f"--explorers; name each explorer once.[/red]"
+        )
+        raise typer.Exit(1)
+    if output_jsonl:
+        error = _output_template_error(output_jsonl, explorer_names, top_k_list) or _output_clash(
+            output_jsonl, explorer_names, top_k_list
+        )
+        if error:
+            console.print(error, style="red", markup=False)
+            raise typer.Exit(1)
+
     # Set generic env vars for explorers that read MSWEA_* directly.
     import os
     os.environ.setdefault("DEFAULT_LLM_PROVIDER", "openai")
@@ -974,15 +1058,6 @@ def run(
     file_line_counts = {} if no_line_counts else _build_file_line_counts(records, repos_root)
     evaluator = ExploreEvaluator(bench_path, file_line_counts=file_line_counts)
 
-    explorer_names = [x.strip().lower() for x in explorers]
-    unknown = set(explorer_names) - ALL_EXPLORERS
-    if unknown:
-        console.print(f"[red]Unknown explorers: {unknown}[/red]")
-        raise typer.Exit(1)
-    clash = _output_clash(output_jsonl, explorer_names, top_k_list) if output_jsonl else None
-    if clash:
-        console.print(f"[red]{clash}[/red]")
-        raise typer.Exit(1)
     if "codenib" in explorer_names:
         try:
             from codenib.agent import normalize_repository_explorer_policy
