@@ -55,9 +55,12 @@ def _run(
     explorers: tuple[str, ...] = ("oracle",),
     top_k: str = TOP_K,
     output: Path | None = None,
+    no_output: bool = False,
 ):
     """Invoke the CLI over `bench`, writing one file per explorer and budget."""
     explorer_args = [arg for name in explorers for arg in ("--explorers", name)]
+    if not no_output:
+        explorer_args += ["--output", str(output or out_dir / "{explorer}" / "top{k}.jsonl")]
     return CliRunner().invoke(
         eval_runner.app,
         [
@@ -66,7 +69,6 @@ def _run(
             "--top-k", top_k,
             "--no-line-counts",
             "--repos", str(out_dir),
-            "--output", str(output or out_dir / "{explorer}" / "top{k}.jsonl"),
             *extra,
         ],
     )
@@ -204,7 +206,6 @@ def test_resume_repairs_a_line_left_half_written(tmp_path):
 @pytest.mark.parametrize(("explorers", "top_k", "template"), [
     (("oracle",), "1,2", "results.jsonl"),
     (("oracle", "random"), "1", "top{k}.jsonl"),
-    (("oracle", "oracle"), "1", "{explorer}{k}.jsonl"),
     (("oracle", "random"), "1", "{explorer}/../top{k}.jsonl"),
     # Distinct result files, but one manifest: the sidecar is named by the stem.
     (("oracle",), "1,2", "results.{k}"),
@@ -433,3 +434,176 @@ def test_output_files_are_closed_when_a_later_one_cannot_be_opened(tmp_path, mon
 
     assert result.exit_code != 0
     assert appended and all(fh.closed for fh in appended)
+
+
+def _add_summary(results: Path, k: int | str) -> None:
+    """Record a summary for budget `k` in the manifest beside `results`."""
+    sidecar = eval_runner._manifest_path(results)
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    data["explorers"]["oracle"]["summary"][str(k)] = {"cases": 4}
+    sidecar.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_resuming_a_file_that_holds_another_budgets_rows_is_refused(tmp_path):
+    """Before one file per budget was enforced, `-k 1,2 -o r.jsonl` put both
+    budgets' rows in one file. A resume with one of them must not adopt the
+    other's rows and rewrite the file without its own."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    results = out / "r.jsonl"
+    assert _run(bench, out, top_k="1", output=results).exit_code == 0
+    assert _run(bench, out, top_k="2", output=out / "s.jsonl").exit_code == 0
+    # What the older harness wrote: both budgets' rows and summaries in one place.
+    with results.open("a", encoding="utf-8") as fh:
+        fh.write((out / "s.jsonl").read_text(encoding="utf-8"))
+    _add_summary(results, 2)
+    sidecar = eval_runner._manifest_path(results)
+    before = {p: p.read_bytes() for p in (results, sidecar)}
+
+    result = _run(bench, out, "--resume", top_k="1", output=results)
+
+    assert result.exit_code == 1
+    assert "rows from several budgets (top_k=2 as well as top_k=1" in _flat(result.stdout)
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_a_refusal_lists_other_budgets_in_numeric_order(tmp_path):
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    results = out / "r.jsonl"
+    assert _run(bench, out, top_k="1", output=results).exit_code == 0
+    _add_summary(results, 10)
+    _add_summary(results, 2)
+
+    result = _run(bench, out, "--resume", top_k="1", output=results)
+
+    assert result.exit_code == 1
+    assert "(top_k=2, top_k=10 as well as top_k=1)" in _flat(result.stdout)
+
+
+def test_a_recorded_budget_the_template_cannot_format_does_not_crash_a_resume(tmp_path):
+    """`{k:c}` names k=65 ("A") but not a k=2000000 left in an old manifest."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    template = out / "{explorer}{k:c}.jsonl"
+    assert _run(bench, out, top_k="65", output=template).exit_code == 0
+    _add_summary(out / "oracleA.jsonl", 2000000)
+
+    result = _run(bench, out, "--resume", top_k="65", output=template)
+
+    assert result.exit_code == 0, result.output
+
+
+def test_a_corrupt_budget_key_does_not_crash_a_resume(tmp_path):
+    """int() refuses a decimal string over 4300 digits; no budget is that long."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    results = out / "r.jsonl"
+    assert _run(bench, out, top_k="1", output=results).exit_code == 0
+    _add_summary(results, "9" * 5000)
+
+    result = _run(bench, out, "--resume", top_k="1", output=results)
+
+    assert result.exit_code == 0, result.output
+
+
+def test_resuming_one_of_several_budget_files_sharing_a_manifest_is_allowed(tmp_path):
+    """Before one manifest per file was enforced, `-k 1,2 -o results.{k}` kept the
+    rows apart in results.1 and results.2 but shared results.manifest.json."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    template = out / "results.{k}"
+    assert _run(bench, out, top_k="1", output=template).exit_code == 0
+    _add_summary(out / "results.1", 2)
+
+    result = _run(bench, out, "--resume", top_k="1", output=template)
+
+    assert result.exit_code == 0, result.output
+
+
+def test_resuming_a_file_with_another_budget_names_that_budget(tmp_path):
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    assert _run(bench, out, top_k="1", output=out / "r.jsonl").exit_code == 0
+    before = (out / "r.jsonl").read_bytes()
+
+    result = _run(bench, out, "--resume", top_k="2", output=out / "r.jsonl")
+
+    assert result.exit_code == 1
+    assert "holds top_k=1 rows" in _flat(result.stdout)
+    assert "not top_k=2" in _flat(result.stdout)
+    assert "several budgets" not in _flat(result.stdout)
+    assert (out / "r.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("leftover", ["empty", "missing"])
+def test_a_stale_manifest_alone_does_not_block_a_resume(tmp_path, leftover):
+    """With no rows left there is nothing to mix."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    results = out / "r.jsonl"
+    assert _run(bench, out, top_k="1", output=results).exit_code == 0
+    _add_summary(results, 2)
+    if leftover == "empty":
+        results.write_text("", encoding="utf-8")
+    else:
+        results.unlink()
+
+    result = _run(bench, out, "--resume", top_k="1", output=results)
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("template, top_k, message", [
+    ("results/{model}/top{k}.jsonl", "1", "unknown placeholder {model}"),
+    ("results/{0}.jsonl", "1", "unknown placeholder {0}"),
+    ("results/{}.jsonl", "1", "unknown placeholder {}"),
+    ("results/{explorer.name}/top{k}.jsonl", "1", "unknown placeholder {explorer.name}"),
+    ("results/{k.jsonl", "1", "not a valid template"),
+    ("results/{k:q}.jsonl", "1", "not a valid template"),
+    # Placeholders nested in a format spec are checked too.
+    ("results/{k:{model}}.jsonl", "1", "unknown placeholder {model}"),
+    ("results/{k:{explorer.name}}.jsonl", "1", "unknown placeholder {explorer.name}"),
+    ("results/{k:{explorer[a]}}.jsonl", "1", "unknown placeholder {explorer[a]}"),
+    # Checked against every budget: `{k:c}` formats k=65 ("A"), not k=2000000.
+    ("{explorer}{k:c}.jsonl", "65,2000000", "not a valid template"),
+    # A name Windows cannot open (k=1), and a NUL nothing can (k=0).
+    ("{explorer}{k:c}.jsonl", "1", "control character"),
+    ("{explorer}{k:c}.jsonl", "0", "control character"),
+])
+def test_a_bad_output_template_is_refused_without_a_traceback(
+    tmp_path, template, top_k, message
+):
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+    out.mkdir()
+
+    result = _run(bench, out, top_k=top_k, output=out / template)
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit), result.exception
+    flat = _flat(result.stdout)
+    assert flat.count(f"--output {str(out / template)!r}") == 1
+    assert message in flat
+    assert "{explorer} and {k}" in flat
+    assert list(out.iterdir()) == []
+
+
+@pytest.mark.parametrize("names, message", [
+    (("oracle", "oracle"), "Explorer oracle is given more than once"),
+    (("oracle", "ORACLE"), "Explorer oracle is given more than once"),
+    (("oracle", "random", "oracle", "random"), "Explorers oracle, random are given more than once"),
+])
+@pytest.mark.parametrize("no_output", [False, True])
+def test_a_repeated_explorer_is_refused(tmp_path, names, message, no_output):
+    """Run twice it would double the spend; with --output it would read as a
+    template problem."""
+    bench = _write_bench(tmp_path / "bench.jsonl")
+    out = tmp_path / "out"
+
+    result = _run(bench, out, explorers=names, top_k="1", no_output=no_output)
+
+    assert result.exit_code == 1
+    assert message in _flat(result.stdout)
+    assert "same result file" not in _flat(result.stdout)
+    assert not out.exists()
